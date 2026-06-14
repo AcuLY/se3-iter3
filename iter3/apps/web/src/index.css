@@ -1,0 +1,49 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 48 5% 8%;
+  --card: 60 16% 96%;
+  --card-foreground: 48 5% 8%;
+  --primary: 351 100% 45%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 60 11% 90%;
+  --secondary-foreground: 48 5% 8%;
+  --muted: 60 14% 97%;
+  --muted-foreground: 60 4% 38%;
+  --accent: 147 58% 86%;
+  --accent-foreground: 148 58% 15%;
+  --destructive: 0 88% 33%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 60 9% 86%;
+  --input: 60 9% 78%;
+  --ring: 231 76% 58%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: Inter, "Segoe UI", system-ui, sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.photo-tile {
+  background-size: cover;
+  background-position: center;
+}

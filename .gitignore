@@ -1,0 +1,30 @@
+# Repository scope
+iter1/
+iter2/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+
+# Dependencies and generated output
+node_modules/
+dist/
+apps/*/dist/
+packages/*/dist/
+*.tsbuildinfo
+*.log
+*.sqlite
+data/uploads/
+
+# Local tool/cache state
+.DS_Store
+Thumbs.db
+.superpowers/

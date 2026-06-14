@@ -1,0 +1,191 @@
+[
+  {
+    "id": "normal-hangzhou",
+    "title": "普通行程生成",
+    "category": "normal_planning",
+    "input": "杭州三天，朋友出行，慢节奏，有咖啡和西湖。",
+    "expected": {
+      "requiredKeywords": ["杭州", "西湖", "咖啡"],
+      "styleKeywords": ["慢节奏"],
+      "minDays": 3,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["PlannerAgent", "WeatherAgent", "TransportAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "杭州两天游，上午西湖，下午自由活动。",
+      "days": 2,
+      "preservedActivityIds": [],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["missing weather and transport tools"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "杭州三天慢节奏行程：西湖晨间散步、湖滨咖啡和街区探索。",
+      "days": 3,
+      "preservedActivityIds": [],
+      "toolCalls": ["StyleAgent", "PlannerAgent", "WeatherAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "skill-fusion-citywalk",
+    "title": "导入 Skill 后风格融合",
+    "category": "skill_fusion",
+    "input": "导入慢节奏街区漫步 Skill，规划杭州 Day 2 下午。",
+    "expected": {
+      "requiredKeywords": ["杭州", "街区"],
+      "styleKeywords": ["慢节奏", "咖啡"],
+      "minDays": 1,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["StyleAgent", "PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "杭州下午参观热门景点。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": []
+    },
+    "optimizedOutput": {
+      "itineraryText": "杭州 Day 2 下午安排慢节奏街区探索，加入咖啡休息，不跨区奔波。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["StyleAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "manual-replan-protection",
+    "title": "手动修改后重规划",
+    "category": "manual_replan",
+    "input": "保留我锁定的博物馆上午安排，下午补一个轻松咖啡。",
+    "expected": {
+      "requiredKeywords": ["博物馆", "咖啡"],
+      "styleKeywords": ["轻松"],
+      "minDays": 1,
+      "preserveActivityIds": ["locked-1"],
+      "requiredToolNames": ["PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "上午改为热门景点，下午自由活动。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": []
+    },
+    "optimizedOutput": {
+      "itineraryText": "上午保留博物馆，下午安排轻松咖啡。",
+      "days": 1,
+      "preservedActivityIds": ["locked-1"],
+      "toolCalls": ["PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "extract-internal-skill",
+    "title": "从系统行程提取 Skill",
+    "category": "skill_extraction_internal",
+    "input": "从当前杭州慢节奏行程总结可复用 Skill。",
+    "expected": {
+      "requiredKeywords": ["Skill", "慢节奏", "街区"],
+      "styleKeywords": ["咖啡"],
+      "minDays": 1,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["SkillExtractorAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "生成一段泛泛而谈的旅游偏好描述。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": [],
+      "scriptErrors": []
+    },
+    "optimizedOutput": {
+      "itineraryText": "生成 Skill 草稿：慢节奏街区、咖啡休息、减少跨区切换。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["SkillExtractorAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "extract-external-skill",
+    "title": "从外部游记提取 Skill",
+    "category": "skill_extraction_external",
+    "input": "外部游记强调海边日落、小店探索和不赶路。",
+    "expected": {
+      "requiredKeywords": ["海边", "小店", "日落"],
+      "styleKeywords": ["松弛"],
+      "minDays": 1,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["SkillExtractorAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "把外部游记原文复制成 Skill。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": [],
+      "scriptErrors": []
+    },
+    "optimizedOutput": {
+      "itineraryText": "提取海边日落、小店探索、低切换的松弛旅行 Skill 草稿。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["SkillExtractorAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "skill-script-success",
+    "title": "Skill 脚本成功执行",
+    "category": "skill_script_success",
+    "input": "Skill 内置脚本返回每日疲劳度评分。",
+    "expected": {
+      "requiredKeywords": ["疲劳度", "评分"],
+      "styleKeywords": ["慢节奏"],
+      "minDays": 1,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["StyleAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "未调用脚本，仅生成普通行程。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["script not invoked"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "脚本返回疲劳度评分，Agent 根据评分调整为慢节奏行程。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["StyleAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "skill-script-fallback",
+    "title": "Skill 脚本失败降级",
+    "category": "skill_script_failure",
+    "input": "导入含脚本的 Skill，但脚本超时。",
+    "expected": {
+      "requiredKeywords": ["降级", "可用"],
+      "styleKeywords": ["慢节奏"],
+      "minDays": 1,
+      "preserveActivityIds": [],
+      "requiredToolNames": ["StyleAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "脚本超时后流程中断。",
+      "days": 0,
+      "preservedActivityIds": [],
+      "toolCalls": ["StyleAgent"],
+      "scriptErrors": ["timeout"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "脚本超时后降级为规则解析，仍保留慢节奏风格并返回可用行程。",
+      "days": 1,
+      "preservedActivityIds": [],
+      "toolCalls": ["StyleAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  }
+]
