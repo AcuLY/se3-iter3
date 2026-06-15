@@ -47,3 +47,97 @@ select {
   background-size: cover;
   background-position: center;
 }
+
+.skill-visual {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.1fr 0.7fr;
+  grid-template-rows: 1fr 0.75fr;
+  gap: 8px;
+  overflow: hidden;
+  padding: 12px;
+  background: #f6f6f3;
+}
+
+.skill-visual::before {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 0.4), transparent 44%),
+    linear-gradient(180deg, transparent 45%, rgb(0 0 0 / 0.08));
+}
+
+.skill-visual__tile {
+  position: relative;
+  border-radius: 16px;
+  background: rgb(255 255 255 / 0.64);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.45);
+}
+
+.skill-visual__tile--large {
+  grid-row: span 2;
+}
+
+.skill-visual__tile--small,
+.skill-visual__tile--wide {
+  min-height: 0;
+}
+
+.skill-visual__caption {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 8px;
+  color: #ffffff;
+  text-shadow: 0 1px 14px rgb(0 0 0 / 0.28);
+}
+
+.skill-visual__caption span,
+.skill-visual__caption strong {
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 0.92);
+  color: #211922;
+  padding: 6px 10px;
+  text-shadow: none;
+}
+
+.skill-visual__caption span {
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.skill-visual__caption strong {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.skill-visual--citywalk {
+  background:
+    linear-gradient(135deg, #35524a 0%, #7e9f90 46%, #d9b38c 100%);
+}
+
+.skill-visual--museum {
+  background:
+    linear-gradient(135deg, #493f50 0%, #a78674 50%, #e9d8bf 100%);
+}
+
+.skill-visual--seaside {
+  background:
+    linear-gradient(135deg, #1f6f8b 0%, #7fc6c6 48%, #f2a65a 100%);
+}
+
+.skill-visual--rainy {
+  background:
+    linear-gradient(135deg, #32465c 0%, #6d8496 48%, #c8d6d9 100%);
+}
+
+.skill-visual--default {
+  background:
+    linear-gradient(135deg, #4c4a44 0%, #9f9181 48%, #e3d8c8 100%);
+}

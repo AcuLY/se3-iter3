@@ -265,6 +265,62 @@ describe("MapService", () => {
     ]);
   });
 
+  it("uses Amap v4 bicycling routes instead of falling back to local estimates", async () => {
+    vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.origin + url.pathname).toBe("https://restapi.amap.com/v4/direction/bicycling");
+      expect(url.searchParams.get("origin")).toBe("120.141,30.259");
+      expect(url.searchParams.get("destination")).toBe("120.165,30.255");
+      return jsonResponse({
+        errcode: 0,
+        errmsg: "OK",
+        data: {
+          paths: [
+            {
+              distance: 3357,
+              duration: 806,
+              steps: [
+                {
+                  instruction: "向东骑行353米左转",
+                  distance: 353,
+                  duration: 85,
+                  polyline: "120.141198,30.259188;120.141372,30.259397"
+                },
+                {
+                  instruction: "沿北山街骑行3004米",
+                  distance: 3004,
+                  duration: 721,
+                  polyline: "120.141372,30.259397;120.165,30.255"
+                }
+              ]
+            }
+          ]
+        }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new MapService();
+    const route = await service.route("120.141,30.259", "120.165,30.255", "cycling");
+
+    expect(route).toMatchObject({
+      mode: "cycling",
+      distanceMeters: 3357,
+      durationMinutes: 14,
+      source: "amap",
+      status: "planned",
+      summary: "向东骑行353米左转；沿北山街骑行3004米"
+    });
+    expect(route.polyline).toEqual([
+      { lng: 120.141198, lat: 30.259188 },
+      { lng: 120.141372, lat: 30.259397 },
+      { lng: 120.141372, lat: 30.259397 },
+      { lng: 120.165, lat: 30.255 }
+    ]);
+    expect(route.steps).toHaveLength(2);
+  });
+
   it("uses traveler-facing Chinese copy for fallback route summaries", async () => {
     const service = new MapService();
     const route = await service.route("西湖", "湖滨银泰", "walking");

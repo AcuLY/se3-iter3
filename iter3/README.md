@@ -10,8 +10,8 @@
 - Node.js + Express
 - SQLite via `node:sqlite`
 - Zod
-- OpenAI Agents SDK 方向预留
-- 高德 API 方向预留，默认 mock fallback
+- OpenAI Agents SDK / DeepSeek 工具调用
+- 高德 Web Service + JS API，缺少 Key 时使用 mock fallback
 
 ## 本地运行
 
@@ -62,4 +62,4 @@ npm run build
 
 ## 外部服务说明
 
-当前版本为了稳定答辩演示，OpenAI/Amap 都以可替换适配点和 mock fallback 形式实现。没有 API Key 时仍可完整运行、测试和演示。
+配置 `DEEPSEEK_API_KEY`、`AMAP_WEB_SERVICE_KEY`、`VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_SECURITY_JS_CODE` 后，应用会调用真实 DeepSeek 和高德服务。当前已验证高德 POI、天气，以及步行、驾车、骑行、公交/地铁路线规划；缺少 Key 或外部服务不可用时仍会降级到本地 fallback，保证本地运行和答辩演示不中断。

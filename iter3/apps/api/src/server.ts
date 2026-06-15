@@ -5,12 +5,12 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JourneyDatabase } from "./db.js";
 import { createFileDatabase } from "./db.js";
-import { AgentService } from "./services/agentService.js";
+import { AgentRunAbortedError, AgentService } from "./services/agentService.js";
 import { EvaluationService } from "./services/evaluationService.js";
 import { ItineraryService } from "./services/itineraryService.js";
 import { MapService } from "./services/mapService.js";
 import { SkillService } from "./services/skillService.js";
-import type { Activity, MapRouteMode, RouteStep } from "@journey/shared";
+import { TravelItinerarySchema, type Activity, type MapRouteMode, type RouteStep } from "@journey/shared";
 
 export type CreateAppOptions = {
   db?: JourneyDatabase;
@@ -32,8 +32,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
     res.json({ ok: true, service: "travel-skill-agent-workbench" });
   });
 
-  app.get("/api/itineraries", (_req, res) => {
-    res.json({ items: itineraries.list() });
+  app.get("/api/itineraries", (req, res) => {
+    res.json({ items: itineraries.list({ includeArchived: asString(req.query.includeArchived) === "true" }) });
   });
 
   app.get("/api/itineraries/:id", (req, res) => {
@@ -47,6 +47,22 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   app.patch("/api/itineraries/:id", (req, res) => {
     res.json({ itinerary: itineraries.update(req.params.id, req.body) });
+  });
+
+  app.post("/api/itineraries/:id/archive", (req, res) => {
+    res.json({ itinerary: itineraries.archive(req.params.id) });
+  });
+
+  app.delete("/api/itineraries/:id", (req, res) => {
+    res.json({ deleted: itineraries.delete(req.params.id) });
+  });
+
+  app.post("/api/itineraries/:id/restore", (req, res) => {
+    const snapshot = TravelItinerarySchema.parse(req.body?.itinerary);
+    if (snapshot.id !== req.params.id) {
+      throw new Error("Restored itinerary id must match route id");
+    }
+    res.json({ itinerary: itineraries.save(snapshot) });
   });
 
   app.post("/api/itineraries/:id/days/:dayId/activities", (req, res) => {
@@ -113,6 +129,16 @@ export function createApp(options: CreateAppOptions = {}): Express {
       steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(toActivity))
     });
     res.json({ itinerary, route });
+  });
+
+  app.delete("/api/itineraries/:id/days/:dayId/transport-legs/:fromActivityId/:toActivityId", (req, res) => {
+    const itinerary = itineraries.removeTransportLeg(
+      req.params.id,
+      req.params.dayId,
+      req.params.fromActivityId,
+      req.params.toActivityId
+    );
+    res.json({ itinerary });
   });
 
   app.post("/api/itineraries/:id/transport-legs/complete", async (req, res) => {
@@ -240,8 +266,16 @@ export function createApp(options: CreateAppOptions = {}): Express {
     res.flushHeaders?.();
 
     let closed = false;
+    const controller = new AbortController();
     req.on("aborted", () => {
       closed = true;
+      controller.abort();
+    });
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        closed = true;
+        controller.abort();
+      }
     });
 
     const send = (event: string, data: unknown) => {
@@ -257,11 +291,16 @@ export function createApp(options: CreateAppOptions = {}): Express {
         "正在检查地点和路线",
         "正在更新行程"
       ]) {
+        if (controller.signal.aborted) return;
         send("progress", { message });
+        await delay(35);
       }
-      const result = await agents.run(req.body);
+      if (controller.signal.aborted) return;
+      const result = await agents.run({ ...req.body, signal: controller.signal });
+      if (controller.signal.aborted) return;
       send("final", result);
     } catch (error) {
+      if (controller.signal.aborted || error instanceof AgentRunAbortedError) return;
       send("error", { message: error instanceof Error ? error.message : "助手暂时无法完成这次规划" });
     } finally {
       if (!closed && !res.writableEnded) res.end();
@@ -278,6 +317,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
       ? db.listSessions().filter((session) => session.itineraryId === itineraryId)
       : db.listSessions();
     res.json({ items });
+  });
+
+  app.delete("/api/agent/sessions", (req, res) => {
+    const itineraryId = asString(req.query.itineraryId);
+    if (!itineraryId) throw new Error("itineraryId is required");
+    res.json({ deleted: db.deleteSessionsForItinerary(itineraryId) });
   });
 
   app.get("/api/maps/poi", async (req, res) => {
@@ -307,7 +352,11 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use((error: unknown, _req: Request, res: Response, _next: () => void) => {
     const message = error instanceof Error ? error.message : "Unknown server error";
     const status = message.includes("not found") || message.includes("not found") ? 404 : 400;
-    res.status(status).json({ error: message });
+    const validation =
+      typeof error === "object" && error && "validation" in error
+        ? (error as { validation?: unknown }).validation
+        : undefined;
+    res.status(status).json(validation ? { error: message, validation } : { error: message });
   });
 
   return app;
@@ -331,6 +380,10 @@ function splitList(value: unknown): string[] {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function routePoint(activity: Activity): string | undefined {

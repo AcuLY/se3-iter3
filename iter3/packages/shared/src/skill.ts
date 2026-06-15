@@ -3,9 +3,30 @@ import type {
   SkillRecommendation,
   SkillRecommendationContext,
   TravelItinerary,
-  TravelSkill
+  TravelSkill,
+  TravelSkillVersion
 } from "./types.js";
 import { createId, nowIso } from "./itinerary.js";
+
+export type SkillValidationCheck = {
+  id: string;
+  label: string;
+  passed: boolean;
+  message: string;
+};
+
+export type SkillValidationResult = {
+  valid: boolean;
+  checks: SkillValidationCheck[];
+  issues: string[];
+};
+
+export class SkillValidationError extends Error {
+  constructor(readonly validation: SkillValidationResult) {
+    super(`旅行风格格式不完整：${validation.issues.join("；")}`);
+    this.name = "SkillValidationError";
+  }
+}
 
 const KNOWN_TAGS = [
   "慢节奏",
@@ -24,26 +45,39 @@ const KNOWN_TAGS = [
   "高强度"
 ];
 
+type SkillVersionedField = "displayName" | "description" | "body" | "tags" | "rules" | "forbidden" | "status";
+type SkillVersionChanges = Partial<Pick<TravelSkill, SkillVersionedField>>;
+
+const SKILL_VERSION_FIELD_LABELS: Record<SkillVersionedField, string> = {
+  displayName: "名称",
+  description: "说明",
+  body: "正文",
+  tags: "标签",
+  rules: "规则",
+  forbidden: "避免项",
+  status: "状态"
+};
+
+const SKILL_VERSIONED_FIELDS = Object.keys(SKILL_VERSION_FIELD_LABELS) as SkillVersionedField[];
+
 export function parseSkillMarkdown(markdown: string): TravelSkill {
-  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
-  if (!match) {
-    throw new Error("SKILL.md must start with YAML frontmatter");
+  const validation = validateSkillMarkdown(markdown);
+  if (!validation.valid) {
+    throw new SkillValidationError(validation);
   }
 
-  const frontmatter = parseFrontmatter(match[1] ?? "");
-  const body = (match[2] ?? "").trim();
-  if (!frontmatter.name || !frontmatter.description) {
-    throw new Error("SKILL.md frontmatter requires name and description");
-  }
+  const { frontmatter, body } = readSkillMarkdownParts(markdown);
+  const name = frontmatterString(frontmatter.name);
+  const description = frontmatterString(frontmatter.description);
 
   const timestamp = nowIso();
   return {
     id: createId("skill"),
-    name: frontmatter.name,
-    displayName: titleFromName(frontmatter.name),
-    description: frontmatter.description,
+    name,
+    displayName: titleFromName(name),
+    description,
     body,
-    tags: extractTags(`${frontmatter.description}\n${body}`),
+    tags: uniqueCleanList([...frontmatterStringList(frontmatter.tags), ...extractTags(`${description}\n${body}`)]),
     rules: extractListSection(body, "规划规则"),
     forbidden: extractListSection(body, "禁止模式"),
     status: "draft",
@@ -56,6 +90,51 @@ export function parseSkillMarkdown(markdown: string): TravelSkill {
   };
 }
 
+export function validateSkillMarkdown(markdown: string): SkillValidationResult {
+  const { hasFrontmatter, frontmatter, body } = readSkillMarkdownParts(markdown);
+  const name = frontmatterString(frontmatter.name);
+  const description = frontmatterString(frontmatter.description);
+  const planningRules = extractListSection(body, "规划规则");
+  const checks: SkillValidationCheck[] = [
+    {
+      id: "frontmatter",
+      label: "包含格式头",
+      passed: hasFrontmatter,
+      message: hasFrontmatter ? "已包含格式头" : "需要以 --- 开头并包含格式头"
+    },
+    {
+      id: "name",
+      label: "填写 name",
+      passed: Boolean(name),
+      message: name ? "已填写 name" : "需要填写 name"
+    },
+    {
+      id: "description",
+      label: "填写 description",
+      passed: Boolean(description),
+      message: description ? "已填写 description" : "需要填写 description"
+    },
+    {
+      id: "body",
+      label: "包含正文说明",
+      passed: Boolean(body.trim()),
+      message: body.trim() ? "已包含正文说明" : "需要补充正文说明"
+    },
+    {
+      id: "planning-rules",
+      label: "包含规划规则",
+      passed: planningRules.length > 0,
+      message: planningRules.length > 0 ? "已添加规划规则" : "至少添加一条规划规则"
+    }
+  ];
+  const issues = checks.filter((check) => !check.passed).map((check) => check.message);
+  return {
+    valid: issues.length === 0,
+    checks,
+    issues
+  };
+}
+
 export function buildSkillMarkdown(input: SkillDraftInput): string {
   const tags = input.tags?.length ? `\ntags: [${input.tags.map((tag) => `"${tag}"`).join(", ")}]` : "";
   const rules = input.rules?.length ? `\n\n## 规划规则\n${input.rules.map((rule) => `- ${rule}`).join("\n")}` : "";
@@ -63,6 +142,76 @@ export function buildSkillMarkdown(input: SkillDraftInput): string {
     ? `\n\n## 禁止模式\n${input.forbidden.map((rule) => `- ${rule}`).join("\n")}`
     : "";
   return `---\nname: ${input.name}\ndescription: ${input.description}${tags}\n---\n\n# ${titleFromName(input.name)}\n\n${input.body.trim()}${rules}${forbidden}\n`;
+}
+
+export function normalizeSkillVersionHistory(skill: TravelSkill): TravelSkillVersion[] {
+  const explicitHistory = (skill.versionHistory ?? [])
+    .filter((version) => Number.isInteger(version.version) && version.version > 0 && version.summary.trim())
+    .map((version) => ({
+      version: version.version,
+      summary: version.summary.trim(),
+      changedFields: uniqueCleanList(version.changedFields ?? []),
+      createdAt: version.createdAt
+    }))
+    .sort((left, right) => left.version - right.version);
+
+  if (explicitHistory.length > 0) return explicitHistory;
+  if (skill.status !== "published") return [];
+
+  return [
+    {
+      version: 1,
+      summary: "发布到广场",
+      changedFields: ["状态"],
+      createdAt: skill.createdAt || skill.updatedAt || nowIso()
+    }
+  ];
+}
+
+export function appendSkillVersion(
+  skill: TravelSkill,
+  changes: SkillVersionChanges,
+  options: { summary?: string; createdAt?: string } = {}
+): TravelSkill {
+  const changedFields = skillVersionChangedFieldLabels(skill, changes);
+  const versionHistory = normalizeSkillVersionHistory(skill);
+  const nextSkill = {
+    ...skill,
+    ...changes,
+    versionHistory
+  };
+
+  if (changedFields.length === 0) return nextSkill;
+
+  const lastVersion = versionHistory[versionHistory.length - 1]?.version ?? 0;
+  return {
+    ...nextSkill,
+    versionHistory: [
+      ...versionHistory,
+      {
+        version: lastVersion + 1,
+        summary: options.summary ?? skillVersionChangeSummary(changedFields),
+        changedFields,
+        createdAt: options.createdAt ?? nowIso()
+      }
+    ]
+  };
+}
+
+export function skillVersionChangedFieldLabels(skill: TravelSkill, changes: SkillVersionChanges): string[] {
+  const labels: string[] = [];
+  for (const field of SKILL_VERSIONED_FIELDS) {
+    if (!(field in changes)) continue;
+    if (skillFieldValueChanged(skill[field], changes[field])) {
+      labels.push(SKILL_VERSION_FIELD_LABELS[field]);
+    }
+  }
+  return labels;
+}
+
+function skillVersionChangeSummary(changedFields: string[]): string {
+  if (changedFields.length === 0) return "更新内容";
+  return `更新${changedFields.slice(0, 3).join("、")}`;
 }
 
 export function recommendSkills(
@@ -117,6 +266,13 @@ export function recommendSkills(
     .sort((a, b) => b.score - a.score || b.skill.favorites - a.skill.favorites);
 }
 
+function skillFieldValueChanged(previous: unknown, next: unknown): boolean {
+  if (Array.isArray(previous) || Array.isArray(next)) {
+    return JSON.stringify(previous ?? []) !== JSON.stringify(next ?? []);
+  }
+  return previous !== next;
+}
+
 export function summarizeItineraryAsSkill(itinerary: TravelItinerary, conversationSummary = ""): TravelSkill {
   const timestamp = nowIso();
   const activityLines = itinerary.days.flatMap((day) =>
@@ -134,7 +290,11 @@ export function summarizeItineraryAsSkill(itinerary: TravelItinerary, conversati
   return {
     id: createId("skill"),
     name: `${slugify(itinerary.destination)}-${slugify(itinerary.title)}`.slice(0, 60),
-    displayName: `${itinerary.destination}风格草稿`,
+    displayName: buildExtractedSkillDraftTitle({
+      destination: itinerary.destination,
+      sourceTitle: itinerary.title,
+      tags
+    }),
     description: `从《${itinerary.title}》提取的旅行风格草稿，需要用户确认后发布。`,
     body: [
       `该 Skill 来自 ${itinerary.destination} 行程和用户对话总结。`,
@@ -162,14 +322,72 @@ export function summarizeItineraryAsSkill(itinerary: TravelItinerary, conversati
   };
 }
 
-function parseFrontmatter(frontmatter: string): Record<string, string> {
-  const entries: Record<string, string> = {};
+export function buildExtractedSkillDraftTitle({
+  destination,
+  sourceTitle,
+  tags
+}: {
+  destination?: string;
+  sourceTitle?: string;
+  tags?: string[];
+}): string {
+  const normalizedTags = uniqueCleanList(tags ?? []);
+  if (destination && sourceTitle) return `${destination} · ${sourceTitle}风格草稿`;
+  if (destination) return `${destination}风格草稿`;
+  if (sourceTitle) return `${sourceTitle}风格草稿`;
+  if (normalizedTags.length > 0) return `${normalizedTags.slice(0, 3).join("、")}风格草稿`;
+  return "旅行风格草稿";
+}
+
+type FrontmatterValue = string | string[] | undefined;
+
+function readSkillMarkdownParts(markdown: string): {
+  hasFrontmatter: boolean;
+  frontmatter: Record<string, FrontmatterValue>;
+  body: string;
+} {
+  const match = markdown.trim().match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) {
+    return {
+      hasFrontmatter: false,
+      frontmatter: {},
+      body: markdown.trim()
+    };
+  }
+  return {
+    hasFrontmatter: true,
+    frontmatter: parseFrontmatter(match[1] ?? ""),
+    body: (match[2] ?? "").trim()
+  };
+}
+
+function parseFrontmatter(frontmatter: string): Record<string, FrontmatterValue> {
+  const entries: Record<string, FrontmatterValue> = {};
   for (const line of frontmatter.split(/\r?\n/)) {
     const [key, ...rest] = line.split(":");
     if (!key || rest.length === 0) continue;
-    entries[key.trim()] = rest.join(":").trim().replace(/^["']|["']$/g, "");
+    const normalizedKey = key.trim();
+    const rawValue = rest.join(":").trim();
+    entries[normalizedKey] =
+      normalizedKey === "tags" ? parseFrontmatterList(rawValue) : rawValue.replace(/^["']|["']$/g, "");
   }
   return entries;
+}
+
+function parseFrontmatterList(value: string): string[] {
+  const trimmed = value.trim();
+  const content = trimmed.startsWith("[") && trimmed.endsWith("]") ? trimmed.slice(1, -1) : trimmed;
+  return uniqueCleanList(content.split(/[,，、]/).map((item) => item.trim().replace(/^["']|["']$/g, "")));
+}
+
+function frontmatterString(value: FrontmatterValue): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function frontmatterStringList(value: FrontmatterValue): string[] {
+  if (Array.isArray(value)) return uniqueCleanList(value);
+  if (typeof value === "string") return parseFrontmatterList(value);
+  return [];
 }
 
 function extractTags(text: string): string[] {
@@ -216,4 +434,8 @@ function slugify(value: string): string {
     .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return ascii || "travel-style";
+}
+
+function uniqueCleanList(items: string[]): string[] {
+  return [...new Set(items.map((item) => item.trim()).filter(Boolean))];
 }

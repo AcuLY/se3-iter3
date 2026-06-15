@@ -4,15 +4,18 @@ import {
   addDay,
   applyItineraryPatch,
   createDraftItinerary,
+  detectTransportTimingConflict,
   diffItineraries,
   exportItineraryMarkdown,
   moveActivity,
   removeActivity,
+  removeTransportLeg,
   renameDay,
   reorderActivity,
   resizeItineraryDateRange,
   setDayWeather,
   setTransportLeg,
+  summarizePlanningChecklist,
   updateActivity
 } from "./itinerary";
 
@@ -251,6 +254,40 @@ describe("itinerary editing helpers", () => {
     expect(exportItineraryMarkdown(itinerary)).toContain("坐标：120.141,30.259");
   });
 
+  it("removes one transport leg by adjacent activity pair", () => {
+    let itinerary = createDraftItinerary({
+      title: "杭州一日路线",
+      destination: "杭州",
+      startDate: "2026-07-01",
+      dayCount: 1
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "西湖",
+      placeName: "西湖"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "food",
+      title: "湖滨咖啡",
+      placeName: "湖滨银泰"
+    });
+    const [from, to] = itinerary.days[0]!.activities;
+    itinerary = setTransportLeg(itinerary, itinerary.days[0]!.id, {
+      fromActivityId: from!.id,
+      toActivityId: to!.id,
+      mode: "walking",
+      distanceMeters: 1300,
+      durationMinutes: 18,
+      provider: "mock",
+      summary: "步行路线"
+    });
+
+    const updated = removeTransportLeg(itinerary, itinerary.days[0]!.id, from!.id, to!.id);
+
+    expect(updated.days[0]!.activities.map((activity) => activity.title)).toEqual(["西湖", "湖滨咖啡"]);
+    expect(updated.days[0]!.transportLegs).toEqual([]);
+  });
+
   it("includes manually adjusted transport leg details in itinerary export", () => {
     let itinerary = createDraftItinerary({
       title: "杭州雨天路线",
@@ -316,6 +353,181 @@ describe("itinerary editing helpers", () => {
     expect(markdown).not.toContain("### 1. \n");
   });
 
+  it("exports a planning checklist for missing places, times, and routable transport gaps", () => {
+    let itinerary = createDraftItinerary({
+      title: "苏州周末规划",
+      destination: "苏州",
+      startDate: "2026-07-04",
+      dayCount: 2
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "拙政园",
+      placeName: "拙政园",
+      startTime: "09:00",
+      endTime: "11:00"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "free_time",
+      title: "",
+      description: ""
+    });
+    itinerary = addActivity(itinerary, itinerary.days[1]!.id, {
+      type: "attraction",
+      title: "苏州博物馆",
+      placeName: "苏州博物馆",
+      startTime: "10:00",
+      endTime: "12:00"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[1]!.id, {
+      type: "food",
+      title: "平江路午餐",
+      placeName: "平江路",
+      startTime: "12:30",
+      endTime: "13:30"
+    });
+
+    const markdown = exportItineraryMarkdown(itinerary);
+
+    expect(markdown).toContain("## 规划检查");
+    expect(markdown).toContain("待补地点：Day 1 第 2 项 待补全安排");
+    expect(markdown).toContain("待补时间：Day 1 第 2 项 待补全安排");
+    expect(markdown).toContain("待计算交通：Day 2 苏州博物馆 到 平江路午餐");
+  });
+
+  it("clears adjacent transport legs when an activity place changes", () => {
+    let itinerary = createDraftItinerary({
+      title: "杭州一日路线",
+      destination: "杭州",
+      startDate: "2026-07-01"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "西湖",
+      placeName: "西湖",
+      place: {
+        name: "西湖",
+        address: "西湖区",
+        coordinates: { lng: 120.141, lat: 30.259 }
+      }
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "food",
+      title: "湖滨午餐",
+      placeName: "湖滨银泰",
+      place: {
+        name: "湖滨银泰",
+        address: "上城区",
+        coordinates: { lng: 120.165, lat: 30.255 }
+      }
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "南山路",
+      placeName: "南山路",
+      place: {
+        name: "南山路",
+        address: "上城区",
+        coordinates: { lng: 120.155, lat: 30.246 }
+      }
+    });
+    const [first, middle, last] = itinerary.days[0]!.activities;
+    itinerary = setTransportLeg(itinerary, itinerary.days[0]!.id, {
+      fromActivityId: first!.id,
+      toActivityId: middle!.id,
+      mode: "walking",
+      distanceMeters: 1300,
+      durationMinutes: 18,
+      provider: "amap"
+    });
+    itinerary = setTransportLeg(itinerary, itinerary.days[0]!.id, {
+      fromActivityId: middle!.id,
+      toActivityId: last!.id,
+      mode: "walking",
+      distanceMeters: 900,
+      durationMinutes: 14,
+      provider: "amap"
+    });
+
+    const noteOnly = updateActivity(itinerary, middle!.id, { note: "避开午高峰" });
+    expect(noteOnly.days[0]!.transportLegs).toHaveLength(2);
+
+    const replacedPlace = updateActivity(itinerary, middle!.id, {
+      placeName: "灵隐寺",
+      place: {
+        name: "灵隐寺",
+        address: "法云弄1号",
+        coordinates: { lng: 120.102, lat: 30.24 }
+      }
+    });
+
+    expect(replacedPlace.days[0]!.activities).toHaveLength(3);
+    expect(replacedPlace.days[0]!.activities[1]!.id).toBe(middle!.id);
+    expect(replacedPlace.days[0]!.transportLegs).toEqual([]);
+  });
+
+  it("summarizes planning checklist gaps for result previews", () => {
+    let itinerary = createDraftItinerary({
+      title: "苏州周末规划",
+      destination: "苏州",
+      startDate: "2026-07-04",
+      dayCount: 2
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "free_time",
+      title: "",
+      description: ""
+    });
+    itinerary = addActivity(itinerary, itinerary.days[1]!.id, {
+      type: "attraction",
+      title: "苏州博物馆",
+      placeName: "苏州博物馆",
+      startTime: "10:00",
+      endTime: "12:00"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[1]!.id, {
+      type: "food",
+      title: "平江路午餐",
+      placeName: "平江路",
+      startTime: "12:30",
+      endTime: "13:30"
+    });
+
+    expect(summarizePlanningChecklist(itinerary)).toEqual({
+      complete: false,
+      total: 3,
+      missingPlaces: ["Day 1 第 1 项 待补全安排"],
+      missingTimes: ["Day 1 第 1 项 待补全安排"],
+      pendingTransport: ["Day 2 苏州博物馆 到 平江路午餐"],
+      missingPlaceItems: [
+        {
+          label: "Day 1 第 1 项 待补全安排",
+          dayId: itinerary.days[0]!.id,
+          activityId: itinerary.days[0]!.activities[0]!.id,
+          activityIndex: 0
+        }
+      ],
+      missingTimeItems: [
+        {
+          label: "Day 1 第 1 项 待补全安排",
+          dayId: itinerary.days[0]!.id,
+          activityId: itinerary.days[0]!.activities[0]!.id,
+          activityIndex: 0
+        }
+      ],
+      pendingTransportItems: [
+        {
+          label: "Day 2 苏州博物馆 到 平江路午餐",
+          dayId: itinerary.days[1]!.id,
+          fromActivityId: itinerary.days[1]!.activities[0]!.id,
+          toActivityId: itinerary.days[1]!.activities[1]!.id,
+          fromActivityIndex: 0,
+          toActivityIndex: 1
+        }
+      ]
+    });
+  });
+
   it("marks fallback transport legs as local estimates in itinerary export", () => {
     let itinerary = createDraftItinerary({
       title: "杭州路线来源",
@@ -346,6 +558,124 @@ describe("itinerary editing helpers", () => {
 
     expect(exportItineraryMarkdown(itinerary)).toContain(
       "交通：步行，1.3 km，18 分钟（本地估算；步行路线建议）"
+    );
+  });
+
+  it("detects when transport time pushes arrival past the next activity start", () => {
+    const conflict = detectTransportTimingConflict(
+      {
+        id: "from",
+        type: "attraction",
+        title: "西湖",
+        startTime: "09:00",
+        endTime: "10:30",
+        tags: [],
+        lockedByUser: false,
+        source: "manual"
+      },
+      {
+        id: "to",
+        type: "food",
+        title: "湖滨午餐",
+        startTime: "11:00",
+        tags: [],
+        lockedByUser: false,
+        source: "manual"
+      },
+      {
+        id: "leg",
+        fromActivityId: "from",
+        toActivityId: "to",
+        mode: "transit",
+        distanceMeters: 4200,
+        durationMinutes: 45,
+        provider: "amap",
+        routeStatus: "planned",
+        manualOverride: false,
+        polyline: [],
+        steps: []
+      }
+    );
+
+    expect(conflict).toEqual({
+      fromEndTime: "10:30",
+      estimatedArrivalTime: "11:15",
+      nextStartTime: "11:00",
+      delayMinutes: 15,
+      message: "预计 11:15 到达，晚于 11:00，需调整上一站停留或下一项开始时间。"
+    });
+  });
+
+  it("does not flag timing when the route arrives before the next activity starts", () => {
+    const conflict = detectTransportTimingConflict(
+      {
+        id: "from",
+        type: "attraction",
+        title: "西湖",
+        endTime: "10:00",
+        tags: [],
+        lockedByUser: false,
+        source: "manual"
+      },
+      {
+        id: "to",
+        type: "food",
+        title: "湖滨午餐",
+        startTime: "11:00",
+        tags: [],
+        lockedByUser: false,
+        source: "manual"
+      },
+      {
+        id: "leg",
+        fromActivityId: "from",
+        toActivityId: "to",
+        mode: "transit",
+        distanceMeters: 4200,
+        durationMinutes: 45,
+        provider: "amap",
+        routeStatus: "planned",
+        manualOverride: false,
+        polyline: [],
+        steps: []
+      }
+    );
+
+    expect(conflict).toBeUndefined();
+  });
+
+  it("includes route timing conflicts in itinerary export", () => {
+    let itinerary = createDraftItinerary({
+      title: "杭州赶场路线",
+      destination: "杭州",
+      startDate: "2026-07-01"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "西湖",
+      placeName: "西湖",
+      endTime: "10:30"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "food",
+      title: "湖滨午餐",
+      placeName: "湖滨银泰",
+      startTime: "11:00"
+    });
+
+    const [from, to] = itinerary.days[0]!.activities;
+    itinerary = setTransportLeg(itinerary, itinerary.days[0]!.id, {
+      fromActivityId: from!.id,
+      toActivityId: to!.id,
+      mode: "transit",
+      distanceMeters: 4200,
+      durationMinutes: 45,
+      provider: "amap",
+      routeStatus: "planned"
+    });
+
+    expect(exportItineraryMarkdown(itinerary)).toContain(
+      "时间提醒：预计 11:15 到达，晚于 11:00，需调整上一站停留或下一项开始时间。"
     );
   });
 
@@ -489,5 +819,24 @@ describe("itinerary editing helpers", () => {
     });
 
     expect(diffItineraries(before, after)).toEqual(["Day 1 新增活动：人民公园茶馆"]);
+  });
+
+  it("summarizes moved activities for the conversation end diff", () => {
+    let before = createDraftItinerary({
+      title: "杭州",
+      destination: "杭州",
+      startDate: "2026-10-01",
+      dayCount: 2
+    });
+    before = addActivity(before, before.days[0]!.id, {
+      type: "food",
+      title: "湖滨咖啡",
+      placeName: "湖滨咖啡"
+    });
+
+    const activityId = before.days[0]!.activities[0]!.id;
+    const after = moveActivity(before, activityId, before.days[1]!.id, 0, "agent");
+
+    expect(diffItineraries(before, after)).toEqual(["移动活动：湖滨咖啡 -> Day 2 第 1 项"]);
   });
 });

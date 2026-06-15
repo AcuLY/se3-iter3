@@ -187,5 +187,599 @@
       "toolCalls": ["StyleAgent", "CriticAgent"],
       "scriptErrors": []
     }
+  },
+  {
+    "id": "intent-route-only",
+    "title": "纯路线补全不新增活动",
+    "category": "intent_routing",
+    "input": "帮我补全所有景点之间的交通路线和时间。",
+    "expected": {
+      "requiredKeywords": ["交通路线", "2 段", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 2,
+      "preserveActivityIds": ["day1-poi-1", "day1-poi-2", "day2-poi-1", "day2-poi-2"],
+      "requiredToolNames": ["TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "新增一个慢节奏街区探索活动，并补全交通路线：3 段。",
+      "days": 2,
+      "preservedActivityIds": ["day1-poi-1", "day1-poi-2", "day2-poi-1", "day2-poi-2"],
+      "toolCalls": ["PlannerAgent", "TransportAgent"],
+      "scriptErrors": ["route request incorrectly created activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已补全交通路线：2 段，原有 4 个活动保持不变，未新增活动。",
+      "days": 2,
+      "preservedActivityIds": ["day1-poi-1", "day1-poi-2", "day2-poi-1", "day2-poi-2"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-details-only",
+    "title": "纯行程信息更新不新增活动",
+    "category": "intent_routing",
+    "input": "把返回日期改到 2026-07-05，预算 2600，备注每天午后留出休息。",
+    "expected": {
+      "requiredKeywords": ["日期范围", "预算", "备注", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 5,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "WeatherAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "已更新日期范围、预算和备注，同时在 Day 2 新增一个慢节奏街区探索活动。",
+      "days": 5,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent", "WeatherAgent"],
+      "scriptErrors": ["details request incorrectly created activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已更新日期范围、预算和备注；原有活动保持不变，未新增活动。",
+      "days": 5,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "WeatherAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-natural-date-details",
+    "title": "中文月日行程信息更新",
+    "category": "intent_routing",
+    "input": "把返回日期改到 7 月 5 日，预算 2600，备注每天午后留出休息。",
+    "expected": {
+      "requiredKeywords": ["日期范围", "2026-07-05", "预算", "备注", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 5,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "WeatherAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只更新了预算和备注，返回日期仍停留在 2026-07-03；或者为了响应请求额外新增一个活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "WeatherAgent"],
+      "scriptErrors": ["natural month-day date was not parsed"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已把返回日期解析为 2026-07-05，并更新日期范围、预算和备注；原有活动保持不变，未新增活动。",
+      "days": 5,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "WeatherAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-profile-details",
+    "title": "目的地同行人偏好信息更新",
+    "category": "intent_routing",
+    "input": "把目的地改成苏州，同行人改成家人和孩子，偏好改成园林、慢节奏、亲子。",
+    "expected": {
+      "requiredKeywords": ["目的地", "苏州", "同行人", "家人", "孩子", "偏好", "亲子", "未新增活动"],
+      "styleKeywords": ["慢节奏", "亲子"],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "WeatherAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "没有修改目的地、同行人和偏好，仍停留在杭州、朋友、咖啡 citywalk；或误把请求当成新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent"],
+      "scriptErrors": ["travel profile details were not parsed"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已更新目的地为苏州，同行人为家人、孩子，偏好为园林、慢节奏、亲子；原有活动保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "WeatherAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-activity-update",
+    "title": "修改已有活动不新增活动",
+    "category": "intent_routing",
+    "input": "把西湖晨间散步改到 10:00-11:30，预算 30，备注改成避开早高峰。",
+    "expected": {
+      "requiredKeywords": ["更新活动", "10:00", "11:30", "预算 30", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "忽略活动修改，或额外新增一个慢节奏活动。原活动仍为 09:00-11:00。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["existing activity edit was not parsed"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已更新活动：西湖晨间散步，时间 10:00-11:30，预算 30 元，备注避开早高峰；原有活动数量保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-place-replace",
+    "title": "替换已有活动地点并解析 POI",
+    "category": "intent_routing",
+    "input": "把湖滨咖啡换成灵隐寺，改成景点，时间 14:00-16:00。",
+    "expected": {
+      "requiredKeywords": ["更新活动", "灵隐寺", "已更新地点", "14:00", "16:00", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["AttractionAgent", "PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只修改了时间，湖滨咖啡仍保留原地点；或者把灵隐寺当成新增活动加入，导致 Day 1 多出一项。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["place replacement was ignored or created a duplicate activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已把湖滨咖啡替换为灵隐寺，写入 POI 地点和 14:00-16:00 时间，原活动数量保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "AttractionAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-place-add",
+    "title": "新增点名地点并解析 POI",
+    "category": "intent_routing",
+    "input": "在 Day 1 下午 15:00-17:00 添加灵隐寺景点，并补全步行路线。",
+    "expected": {
+      "requiredKeywords": ["已添加地点", "灵隐寺", "已补全交通路线", "未新增泛化活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["AttractionAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只补了一个慢节奏街区探索活动，没有搜索灵隐寺 POI，也没有写入可用于地图的坐标。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["explicit place add fell back to generic activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已添加地点：灵隐寺，并补全交通路线：2 段；新增的是用户点名 POI，未新增泛化活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "AttractionAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-specific-transport-mode",
+    "title": "指定路段交通方式调整",
+    "category": "intent_routing",
+    "input": "把西湖晨间散步到湖滨咖啡这段交通改成公交/地铁。",
+    "expected": {
+      "requiredKeywords": ["已更新交通", "公交", "地铁", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "没有写入任何交通路线，或把请求当成全程步行补全。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent"],
+      "scriptErrors": ["specific transport mode was not parsed"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已更新交通：西湖晨间散步 到 湖滨咖啡，方式为公交/地铁；原有活动数量保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-transport-compare-fastest",
+    "title": "比较交通方式并选择最快路线",
+    "category": "intent_routing",
+    "input": "比较西湖晨间散步到湖滨咖啡的步行、公交和骑行，选最快的路线。",
+    "expected": {
+      "requiredKeywords": ["已比较交通方式", "步行", "公交/地铁", "骑行", "已选择骑行", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只因为句子里出现公交/地铁就写入公交路线，没有比较步行和骑行，也没有选择最快方式。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["TransportAgent"],
+      "scriptErrors": ["comparison intent collapsed to first mentioned mode"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已比较交通方式：步行、公交/地铁、骑行，已选择骑行；原有活动保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-route-conflict-faster-mode",
+    "title": "路线晚到后改用更快交通方式",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，帮我换个更快的交通方式，不改活动时间。",
+    "expected": {
+      "requiredKeywords": ["已比较交通方式", "步行", "公交/地铁", "驾车", "骑行", "已选择骑行", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "忽略“不改活动时间”，直接把湖滨咖啡顺延到 11:45；原交通方式仍保留。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent", "TransportAgent"],
+      "scriptErrors": ["faster transport intent was treated as delay-next timing fix"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已比较交通方式：步行、公交/地铁、驾车、骑行，已选择骑行；活动时间保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-transport-remove",
+    "title": "取消指定交通段但保留活动",
+    "category": "intent_routing",
+    "input": "取消西湖晨间散步到湖滨咖啡这段交通，活动本身保留。",
+    "expected": {
+      "requiredKeywords": ["已取消交通", "西湖晨间散步", "湖滨咖啡", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "误删了西湖晨间散步或忽略取消请求，已有交通段仍留在画布中。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["transport cancellation removed an activity or left the route unchanged"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已取消交通：西湖晨间散步 到 湖滨咖啡；两个活动仍保留，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-route-conflict-delay-next",
+    "title": "路线晚到后顺延下一项活动",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，帮我延后下一项。",
+    "expected": {
+      "requiredKeywords": ["已顺延活动", "湖滨咖啡", "11:45", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只提示交通可能晚到，但没有改动画布时间；或者重新新增一个替代活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["TransportAgent"],
+      "scriptErrors": ["route timing conflict was detected but not applied to itinerary"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已顺延活动：湖滨咖啡 到 11:45；原路线和两个活动仍保留，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-route-conflict-shorten-previous",
+    "title": "路线晚到后缩短上一站停留",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，帮我缩短上一站停留。",
+    "expected": {
+      "requiredKeywords": ["已缩短停留", "西湖晨间散步", "10:45", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只把下一项顺延到 11:45，忽略了用户明确要求缩短上一站停留。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent", "TransportAgent"],
+      "scriptErrors": ["route conflict strategy ignored shorten previous intent"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已缩短停留：西湖晨间散步 到 10:45；湖滨咖啡时间保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-route-conflict-shift-downstream",
+    "title": "路线晚到后整体顺延后续安排",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，帮我整体顺延后续安排。",
+    "expected": {
+      "requiredKeywords": ["已顺延后续安排", "湖滨咖啡", "11:45", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只顺延湖滨咖啡，后续活动仍停在原时间，导致当天后半程留出错误空档。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent", "TransportAgent"],
+      "scriptErrors": ["route conflict downstream activities were not shifted"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "已顺延后续安排：2 项，湖滨咖啡 到 11:45；后续活动同步后移，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-route-conflict-options",
+    "title": "路线晚到后先给多方案取舍",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，先给我几个调整方案，暂时不要改画布。",
+    "expected": {
+      "requiredKeywords": ["路线会在", "顺延下一项", "缩短上一站", "改用更快交通方式", "未修改画布"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "TransportAgent", "PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "把“暂时不要改画布”误判为取消交通，直接删除西湖晨间散步到湖滨咖啡的路段，用户还没选择方案画布就被改了。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent"],
+      "scriptErrors": ["read-only option request mutated the canvas"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "路线会在 11:45 左右到达，晚于湖滨咖啡的 11:30。可选方案：顺延下一项、缩短上一站、改用更快交通方式；未修改画布，等待用户选择。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-activity-move",
+    "title": "移动已有活动到另一日",
+    "category": "intent_routing",
+    "input": "把湖滨咖啡移到 Day 2 上午第一项。",
+    "expected": {
+      "requiredKeywords": ["移动活动", "Day 2", "第 1 项", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "把移动请求误判为新增安排，Day 2 多出一个新活动，湖滨咖啡仍留在 Day 1。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["move request incorrectly created activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "移动活动：湖滨咖啡 -> Day 2 第 1 项；原有活动数量保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "intent-activity-remove",
+    "title": "删除已有活动不新增活动",
+    "category": "intent_routing",
+    "input": "删掉湖滨咖啡，其他活动保持不变。",
+    "expected": {
+      "requiredKeywords": ["删除活动", "湖滨咖啡", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake"],
+      "requiredToolNames": ["PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "没有删除湖滨咖啡，或把删除请求误判为重新规划并新增一个替代活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent"],
+      "scriptErrors": ["remove request was ignored or created a replacement activity"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "删除活动：湖滨咖啡；西湖晨间散步等其他活动保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "deepseek-add-place-route-closure",
+    "title": "在线模型新增地点后补齐相邻路线",
+    "category": "tool_orchestration",
+    "input": "Please add Lingyin Temple to Day 1 afternoon and complete the route between adjacent stops.",
+    "expected": {
+      "requiredKeywords": ["Lingyin Temple", "已补全交通路线", "2 段"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["PlannerAgent", "AttractionAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "只新增 Lingyin Temple 活动并解析地点，没有写入任何相邻交通路线，地图画布出现断裂。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["PlannerAgent", "AttractionAgent"],
+      "scriptErrors": ["online model did not call complete_transport_legs"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "新增 Lingyin Temple visit，解析地点坐标，并在 Day 1 补齐 2 段相邻步行路线；原有活动保持不变。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "AttractionAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "deepseek-transport-compare-tool",
+    "title": "在线模型通过工具比较交通方式",
+    "category": "intent_routing",
+    "input": "比较西湖晨间散步到湖滨咖啡的交通方式，选最快路线。",
+    "expected": {
+      "requiredKeywords": ["已比较交通方式", "步行", "公交/地铁", "驾车", "骑行", "已选择骑行"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "在线模型只能返回文字说明，或者只能调用 set_transport_leg 写入单一交通方式，无法由服务端比较候选路线。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent"],
+      "scriptErrors": ["online model had no compare_transport_modes tool"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "DeepSeek 调用 compare_transport_modes 后，已比较交通方式：步行、公交/地铁、驾车、骑行，已选择骑行。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "deepseek-place-replace-tool",
+    "title": "在线模型通过工具替换已有活动地点",
+    "category": "intent_routing",
+    "input": "把湖滨咖啡换成灵隐寺，选正式景区，活动本身保留。",
+    "expected": {
+      "requiredKeywords": ["已更新地点", "灵隐寺飞来峰景区", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "AttractionAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "在线模型只能用 update_activity 改标题或地点文字，未调用 POI 搜索，地图仍保留旧地点坐标。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent"],
+      "scriptErrors": ["online model had no update_activity_place tool"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "DeepSeek 调用 update_activity_place 后，已更新地点：灵隐寺飞来峰景区；湖滨咖啡活动槽位被替换为正式景区 POI，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "AttractionAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "deepseek-transport-remove-tool",
+    "title": "在线模型通过工具取消指定交通段",
+    "category": "intent_routing",
+    "input": "取消西湖晨间散步到湖滨咖啡这段交通，活动本身保留。",
+    "expected": {
+      "requiredKeywords": ["已取消交通", "西湖晨间散步", "湖滨咖啡", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "TransportAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "在线模型只能文字说明已取消，或误调用 remove_activity 删除湖滨咖啡，导致活动缺失。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake"],
+      "toolCalls": ["MainAgent"],
+      "scriptErrors": ["online model had no remove_transport_leg tool"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "DeepSeek 调用 remove_transport_leg 后，已取消交通：西湖晨间散步 到 湖滨咖啡；两个活动保持不变，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "TransportAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
+  },
+  {
+    "id": "deepseek-route-conflict-delay-next-tool",
+    "title": "在线模型通过工具修复路线晚到",
+    "category": "intent_routing",
+    "input": "西湖晨间散步到湖滨咖啡这段交通会晚到，帮我延后下一项。",
+    "expected": {
+      "requiredKeywords": ["已顺延活动", "湖滨咖啡", "11:45", "未新增活动"],
+      "styleKeywords": [],
+      "minDays": 3,
+      "preserveActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "requiredToolNames": ["MainAgent", "PlannerAgent", "CriticAgent"]
+    },
+    "badCaseOutput": {
+      "itineraryText": "在线模型只能文字说明路线会晚到，或用 update_activity 猜测时间，无法复用服务端冲突检测。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent"],
+      "scriptErrors": ["online model had no adjust_timing_conflict tool"]
+    },
+    "optimizedOutput": {
+      "itineraryText": "DeepSeek 调用 adjust_timing_conflict 后，已顺延活动：湖滨咖啡 到 11:45；原路线和两个活动仍保留，未新增活动。",
+      "days": 3,
+      "preservedActivityIds": ["seed-day1-westlake", "seed-day1-cafe"],
+      "toolCalls": ["MainAgent", "PlannerAgent", "CriticAgent"],
+      "scriptErrors": []
+    }
   }
 ]

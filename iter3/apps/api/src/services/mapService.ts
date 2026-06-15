@@ -256,7 +256,7 @@ function routeUrl(mode: MapRouteMode): URL {
 }
 
 function normalizeAmapRoute(data: AmapRouteResponse, mode: MapRouteMode, from: string, to: string): RouteSummary | undefined {
-  if (data.status !== "1") return undefined;
+  if (!isAmapRouteSuccess(data)) return undefined;
   const path = data.route?.paths?.[0] ?? data.data?.paths?.[0];
   if (path) {
     const steps = path.steps ?? [];
@@ -334,6 +334,10 @@ function normalizeAmapRoute(data: AmapRouteResponse, mode: MapRouteMode, from: s
     };
   }
   return undefined;
+}
+
+function isAmapRouteSuccess(data: AmapRouteResponse): boolean {
+  return data.status === "1" || data.errcode === 0;
 }
 
 function parseAmapDistance(value: unknown): number | undefined {
@@ -421,7 +425,8 @@ type AmapPoiResponse = {
 };
 
 type AmapRouteResponse = {
-  status: string;
+  status?: string;
+  errcode?: number;
   route?: {
     paths?: AmapPath[];
     transits?: Array<{

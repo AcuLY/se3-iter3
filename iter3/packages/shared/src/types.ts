@@ -131,6 +131,7 @@ export const TravelItinerarySchema = z.object({
   importedSkillIds: z.array(z.string()).default([]),
   manualRevision: z.number().int().nonnegative().default(0),
   agentRevision: z.number().int().nonnegative().default(0),
+  archivedAt: z.string().optional(),
   updatedAt: z.string()
 });
 
@@ -192,6 +193,15 @@ export type PatchResult = {
   diff: string[];
 };
 
+export const TravelSkillVersionSchema = z.object({
+  version: z.number().int().positive(),
+  summary: z.string(),
+  changedFields: z.array(z.string()),
+  createdAt: z.string()
+});
+
+export type TravelSkillVersion = z.infer<typeof TravelSkillVersionSchema>;
+
 export const TravelSkillSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -207,6 +217,7 @@ export const TravelSkillSchema = z.object({
   favorites: z.number().int().nonnegative().default(0),
   favorited: z.boolean().default(false),
   scriptEntry: z.string().optional(),
+  versionHistory: z.array(TravelSkillVersionSchema).optional(),
   createdAt: z.string(),
   updatedAt: z.string()
 });
@@ -297,6 +308,7 @@ export type EvaluationCategory =
   | "skill_extraction_internal"
   | "skill_extraction_external"
   | "manual_replan"
+  | "intent_routing"
   | "skill_script_success"
   | "skill_script_failure";
 

@@ -1,5 +1,8 @@
 import {
+  appendSkillVersion,
   buildSkillMarkdown,
+  buildExtractedSkillDraftTitle,
+  normalizeSkillVersionHistory,
   nowIso,
   parseSkillMarkdown,
   recommendSkills,
@@ -44,6 +47,7 @@ export class SkillService {
       skill = summarizeItineraryAsSkill(itinerary, sourceText);
     } else {
       const timestamp = nowIso();
+      const tags = inferTags(sourceText);
       const markdown = buildSkillMarkdown({
         name: "extracted-travel-style",
         description: "从用户粘贴内容中提取的旅行风格草稿，需要确认后发布。",
@@ -57,14 +61,14 @@ export class SkillService {
           "- 保留文本中反复出现的节奏、地点类型和禁忌。",
           "- 根据新目的地重新适配，不直接复制全部地点。"
         ].join("\n"),
-        tags: inferTags(sourceText),
+        tags,
         rules: ["根据新目的地重新适配", "保留原文本偏好的节奏"],
         forbidden: ["未经用户确认直接发布"]
       });
       skill = {
         ...parseSkillMarkdown(markdown),
         id: `skill-extracted-${Date.now().toString(36)}`,
-        displayName: "待确认旅行风格",
+        displayName: buildExtractedSkillDraftTitle({ tags }),
         status: "draft",
         source: "extracted",
         createdAt: timestamp,
@@ -77,26 +81,32 @@ export class SkillService {
 
   update(id: string, changes: SkillUpdate): TravelSkill {
     const skill = this.get(id);
+    const timestamp = nowIso();
     return this.db.saveSkill({
-      ...skill,
-      ...cleanSkillChanges(changes),
-      updatedAt: nowIso()
+      ...appendSkillVersion(skill, cleanSkillChanges(changes), { createdAt: timestamp }),
+      updatedAt: timestamp
     });
   }
 
   publish(id: string, changes: SkillUpdate): TravelSkill {
-    return this.update(id, {
+    const skill = this.get(id);
+    const timestamp = nowIso();
+    const cleaned = cleanSkillChanges({
       ...changes,
       status: "published"
+    });
+    return this.db.saveSkill({
+      ...appendSkillVersion(skill, cleaned, { summary: "发布到广场", createdAt: timestamp }),
+      updatedAt: timestamp
     });
   }
 
   unpublish(id: string): TravelSkill {
     const skill = this.get(id);
+    const timestamp = nowIso();
     return this.db.saveSkill({
-      ...skill,
-      status: "draft",
-      updatedAt: nowIso()
+      ...appendSkillVersion(skill, { status: "draft" }, { summary: "转回草稿", createdAt: timestamp }),
+      updatedAt: timestamp
     });
   }
 
@@ -142,7 +152,8 @@ function normalizeSkill(skill: TravelSkill): TravelSkill {
     forbidden: skill.forbidden ?? [],
     imports: skill.imports ?? 0,
     favorites: skill.favorites ?? 0,
-    favorited: skill.favorited ?? false
+    favorited: skill.favorited ?? false,
+    versionHistory: normalizeSkillVersionHistory(skill)
   };
 }
 

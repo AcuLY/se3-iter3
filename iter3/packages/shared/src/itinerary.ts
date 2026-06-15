@@ -118,18 +118,26 @@ export function updateActivity(
   changes: Partial<Activity>,
   source: Activity["source"] = "manual"
 ): TravelItinerary {
-  const days = itinerary.days.map((day) => ({
-    ...day,
-    activities: day.activities.map((activity) =>
-      activity.id === activityId
-        ? {
-            ...activity,
-            ...changes,
-            id: activity.id
-          }
-        : activity
-    )
-  }));
+  const days = itinerary.days.map((day) => {
+    let routePlaceChanged = false;
+    const activities = day.activities.map((activity) => {
+      if (activity.id !== activityId) return activity;
+      const nextActivity = {
+        ...activity,
+        ...changes,
+        id: activity.id
+      };
+      routePlaceChanged = activityRoutePlaceKey(activity) !== activityRoutePlaceKey(nextActivity);
+      return nextActivity;
+    });
+    return {
+      ...day,
+      activities,
+      transportLegs: routePlaceChanged
+        ? (day.transportLegs ?? []).filter((leg) => leg.fromActivityId !== activityId && leg.toActivityId !== activityId)
+        : day.transportLegs
+    };
+  });
   const next = { ...itinerary, days };
   return source === "agent" ? touchAgent(next) : touchManual(next);
 }
@@ -290,6 +298,26 @@ export function setTransportLeg(
   return source === "agent" ? touchAgent(next) : touchManual(next);
 }
 
+export function removeTransportLeg(
+  itinerary: TravelItinerary,
+  dayId: string,
+  fromActivityId: string,
+  toActivityId: string,
+  source: Activity["source"] = "manual"
+): TravelItinerary {
+  const days = itinerary.days.map((day) => {
+    if (day.id !== dayId) return day;
+    return {
+      ...day,
+      transportLegs: (day.transportLegs ?? []).filter(
+        (leg) => leg.fromActivityId !== fromActivityId || leg.toActivityId !== toActivityId
+      )
+    };
+  });
+  const next = { ...itinerary, days };
+  return source === "agent" ? touchAgent(next) : touchManual(next);
+}
+
 export function setDayWeather(
   itinerary: TravelItinerary,
   dayId: string,
@@ -377,6 +405,11 @@ export function findActivity(itinerary: TravelItinerary, activityId: string): Ac
 export function diffItineraries(before: TravelItinerary, after: TravelItinerary): string[] {
   const beforeDays = new Map(before.days.map((day) => [day.id, day]));
   const beforeActivities = new Map(before.days.flatMap((day) => day.activities.map((activity) => [activity.id, activity])));
+  const beforeActivityLocations = new Map(
+    before.days.flatMap((day) =>
+      day.activities.map((activity, index) => [activity.id, { dayId: day.id, dayTitle: day.title, index }])
+    )
+  );
   const afterActivities = new Map(after.days.flatMap((day) => day.activities.map((activity) => [activity.id, activity])));
   const diff: string[] = [];
 
@@ -392,6 +425,10 @@ export function diffItineraries(before: TravelItinerary, after: TravelItinerary)
       if (!previous) {
         diff.push(`${day.title} 新增活动：${activity.title}`);
         continue;
+      }
+      const previousLocation = beforeActivityLocations.get(activity.id);
+      if (previousLocation && (previousLocation.dayId !== day.id || previousLocation.index !== day.activities.indexOf(activity))) {
+        diff.push(`移动活动：${activity.title} -> ${day.title} 第 ${day.activities.indexOf(activity) + 1} 项`);
       }
       if (
         previous.title !== activity.title ||
@@ -422,6 +459,64 @@ type ExportDaySummary = {
   durationMinutes: number;
   costCny?: number;
 };
+
+export type PlanningChecklist = {
+  complete: boolean;
+  total: number;
+  missingPlaces: string[];
+  missingTimes: string[];
+  pendingTransport: string[];
+  missingPlaceItems: PlanningActivityChecklistItem[];
+  missingTimeItems: PlanningActivityChecklistItem[];
+  pendingTransportItems: PlanningTransportChecklistItem[];
+};
+
+export type PlanningActivityChecklistItem = {
+  label: string;
+  dayId: string;
+  activityId: string;
+  activityIndex: number;
+};
+
+export type PlanningTransportChecklistItem = {
+  label: string;
+  dayId: string;
+  fromActivityId: string;
+  toActivityId: string;
+  fromActivityIndex: number;
+  toActivityIndex: number;
+};
+
+export type TransportTimingConflict = {
+  fromEndTime: string;
+  estimatedArrivalTime: string;
+  nextStartTime: string;
+  delayMinutes: number;
+  message: string;
+};
+
+export function detectTransportTimingConflict(
+  from: Activity,
+  to: Activity,
+  leg: Pick<TransportLeg, "durationMinutes">
+): TransportTimingConflict | undefined {
+  const fromEndMinutes = parseClockMinutes(from.endTime);
+  const nextStartMinutes = parseClockMinutes(to.startTime);
+  if (fromEndMinutes === undefined || nextStartMinutes === undefined || leg.durationMinutes <= 0) return undefined;
+
+  const estimatedArrivalMinutes = fromEndMinutes + leg.durationMinutes;
+  if (estimatedArrivalMinutes <= nextStartMinutes) return undefined;
+
+  const estimatedArrivalTime = formatClockMinutes(estimatedArrivalMinutes);
+  const nextStartTime = formatClockMinutes(nextStartMinutes);
+  return {
+    fromEndTime: formatClockMinutes(fromEndMinutes),
+    estimatedArrivalTime,
+    nextStartTime,
+    delayMinutes: estimatedArrivalMinutes - nextStartMinutes,
+    message: `预计 ${estimatedArrivalTime} 到达，晚于 ${nextStartTime}，需调整上一站停留或下一项开始时间。`
+  };
+}
 
 export function exportItineraryMarkdown(itinerary: TravelItinerary): string {
   const daySummaries = itinerary.days.map((day) => summarizeDayForExport(day));
@@ -466,6 +561,10 @@ export function exportItineraryMarkdown(itinerary: TravelItinerary): string {
     lines.push(`未计算交通：${summary.pendingTransportLegCount} 段`);
   }
   lines.push("");
+  lines.push("## 规划检查");
+  lines.push("");
+  lines.push(...formatPlanningChecklistLines(itinerary));
+  lines.push("");
 
   for (let dayIndex = 0; dayIndex < itinerary.days.length; dayIndex += 1) {
     const day = itinerary.days[dayIndex]!;
@@ -498,7 +597,7 @@ export function exportItineraryMarkdown(itinerary: TravelItinerary): string {
         const leg = (day.transportLegs ?? []).find(
           (candidate) => candidate.fromActivityId === activity.id && candidate.toActivityId === next.id
         );
-        if (leg) lines.push(...formatTransportLegLines(leg));
+        if (leg) lines.push(...formatTransportLegLines(leg, activity, next));
       }
       lines.push("");
     }
@@ -555,6 +654,90 @@ function canExportRouteActivityPair(from: Activity, to: Activity): boolean {
   return hasExportRouteEndpoint(from) && hasExportRouteEndpoint(to);
 }
 
+export function summarizePlanningChecklist(itinerary: TravelItinerary): PlanningChecklist {
+  const missingPlaces: string[] = [];
+  const missingTimes: string[] = [];
+  const pendingTransport: string[] = [];
+  const missingPlaceItems: PlanningActivityChecklistItem[] = [];
+  const missingTimeItems: PlanningActivityChecklistItem[] = [];
+  const pendingTransportItems: PlanningTransportChecklistItem[] = [];
+
+  for (const day of itinerary.days) {
+    day.activities.forEach((activity, index) => {
+      const activityLabel = formatPlanningActivityLabel(day, activity, index);
+      if (!hasExportPlace(activity)) {
+        missingPlaces.push(activityLabel);
+        missingPlaceItems.push({
+          label: activityLabel,
+          dayId: day.id,
+          activityId: activity.id,
+          activityIndex: index
+        });
+      }
+      if (!activity.startTime || !activity.endTime) {
+        missingTimes.push(activityLabel);
+        missingTimeItems.push({
+          label: activityLabel,
+          dayId: day.id,
+          activityId: activity.id,
+          activityIndex: index
+        });
+      }
+
+      const next = day.activities[index + 1];
+      if (!next || !canExportRouteActivityPair(activity, next)) return;
+      const hasLeg = (day.transportLegs ?? []).some(
+        (leg) => leg.fromActivityId === activity.id && leg.toActivityId === next.id
+      );
+      if (!hasLeg) {
+        const label = `${day.title} ${formatActivityTitleForExport(activity)} 到 ${formatActivityTitleForExport(next)}`;
+        pendingTransport.push(label);
+        pendingTransportItems.push({
+          label,
+          dayId: day.id,
+          fromActivityId: activity.id,
+          toActivityId: next.id,
+          fromActivityIndex: index,
+          toActivityIndex: index + 1
+        });
+      }
+    });
+  }
+
+  const total = missingPlaces.length + missingTimes.length + pendingTransport.length;
+  return {
+    complete: total === 0,
+    total,
+    missingPlaces,
+    missingTimes,
+    pendingTransport,
+    missingPlaceItems,
+    missingTimeItems,
+    pendingTransportItems
+  };
+}
+
+function formatPlanningChecklistLines(itinerary: TravelItinerary): string[] {
+  const checklist = summarizePlanningChecklist(itinerary);
+  const lines: string[] = [];
+  if (checklist.complete) {
+    return ["状态：已补齐地点、时间和相邻交通。"];
+  }
+  lines.push(`待补项：${checklist.total} 项`);
+  lines.push(...checklist.missingPlaces.map((item) => `待补地点：${item}`));
+  lines.push(...checklist.missingTimes.map((item) => `待补时间：${item}`));
+  lines.push(...checklist.pendingTransport.map((item) => `待计算交通：${item}`));
+  return lines;
+}
+
+function formatPlanningActivityLabel(day: ItineraryDay, activity: Activity, index: number): string {
+  return `${day.title} 第 ${index + 1} 项 ${formatActivityTitleForExport(activity)}`;
+}
+
+function hasExportPlace(activity: Activity): boolean {
+  return Boolean(activity.place?.coordinates || activity.placeName?.trim() || activity.place?.name?.trim());
+}
+
 function hasExportRouteEndpoint(activity: Activity): boolean {
   return Boolean(
     activity.place?.coordinates ||
@@ -580,8 +763,12 @@ function formatComputedTransportSummary(summary: ExportDaySummary): string {
   return `已计算交通：${parts.join("，")}`;
 }
 
-function formatTransportLegLines(leg: TransportLeg): string[] {
+function formatTransportLegLines(leg: TransportLeg, from?: Activity, to?: Activity): string[] {
   const lines = [formatTransportLegLine(leg)];
+  if (from && to) {
+    const conflict = detectTransportTimingConflict(from, to, leg);
+    if (conflict) lines.push(`时间提醒：${conflict.message}`);
+  }
   const routeSteps = formatRouteSteps(leg);
   if (routeSteps) lines.push(routeSteps);
   return lines;
@@ -672,11 +859,33 @@ function keepAdjacentTransportLegs(day: ItineraryDay): ItineraryDay {
   };
 }
 
+function activityRoutePlaceKey(activity: Activity): string {
+  const coordinates = activity.place?.coordinates;
+  const coordinateKey = coordinates ? `${trimCoordinate(coordinates.lng)},${trimCoordinate(coordinates.lat)}` : "";
+  return [activity.place?.poiId ?? "", coordinateKey, activity.placeName ?? activity.place?.name ?? ""].join("|");
+}
+
 function countInclusiveDays(startDate: string, endDate: string): number {
   const start = Date.parse(`${startDate}T00:00:00.000Z`);
   const end = Date.parse(`${endDate}T00:00:00.000Z`);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 1;
   return Math.floor((end - start) / 86_400_000) + 1;
+}
+
+function parseClockMinutes(value: string | undefined): number | undefined {
+  const match = /^(\d{2}):(\d{2})$/.exec(value ?? "");
+  if (!match) return undefined;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes) || hours > 23 || minutes > 59) return undefined;
+  return hours * 60 + minutes;
+}
+
+function formatClockMinutes(totalMinutes: number): string {
+  const normalized = ((totalMinutes % 1440) + 1440) % 1440;
+  const hours = Math.floor(normalized / 60);
+  const minutes = normalized % 60;
+  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
 }
 
 function formatDistance(distanceMeters: number): string {

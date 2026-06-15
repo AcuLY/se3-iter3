@@ -30,6 +30,10 @@ export class JourneyDatabase {
     return itinerary;
   }
 
+  deleteItinerary(id: string): boolean {
+    return this.deleteJson("itineraries", id) > 0;
+  }
+
   listSkills(): TravelSkill[] {
     return this.listJson<TravelSkill>("skills");
   }
@@ -58,6 +62,20 @@ export class JourneyDatabase {
   saveSession(session: AgentSession): AgentSession {
     this.saveJson("sessions", session.id, session);
     return session;
+  }
+
+  deleteSessionsForItinerary(itineraryId: string): number {
+    const sessions = this.listSessions().filter((session) => session.itineraryId === itineraryId);
+    const sessionIds = new Set(sessions.map((session) => session.id));
+    for (const session of sessions) {
+      this.deleteJson("sessions", session.id);
+    }
+    for (const trace of this.listTraces()) {
+      if (sessionIds.has(trace.sessionId)) {
+        this.deleteJson("traces", trace.id);
+      }
+    }
+    return sessions.length;
   }
 
   listTraces(sessionId?: string): AgentTraceEvent[] {
@@ -144,8 +162,9 @@ export class JourneyDatabase {
       .run(id, JSON.stringify(value), new Date().toISOString());
   }
 
-  private deleteJson(table: TableName, id: string): void {
-    this.db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+  private deleteJson(table: TableName, id: string): number {
+    const result = this.db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+    return Number(result.changes ?? 0);
   }
 }
 

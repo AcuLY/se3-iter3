@@ -7,6 +7,7 @@ import {
   moveActivity,
   nowIso,
   removeActivity,
+  removeTransportLeg,
   reorderActivity,
   resizeItineraryDateRange,
   setDayWeather,
@@ -24,8 +25,9 @@ import type { JourneyDatabase } from "../db.js";
 export class ItineraryService {
   constructor(private readonly db: JourneyDatabase) {}
 
-  list(): TravelItinerary[] {
-    return this.db.listItineraries();
+  list(options: { includeArchived?: boolean } = {}): TravelItinerary[] {
+    const items = this.db.listItineraries();
+    return options.includeArchived ? items : items.filter((itinerary) => !itinerary.archivedAt);
   }
 
   get(id: string): TravelItinerary {
@@ -63,6 +65,21 @@ export class ItineraryService {
     });
   }
 
+  archive(itineraryId: string): TravelItinerary {
+    const itinerary = this.get(itineraryId);
+    return this.db.saveItinerary({
+      ...itinerary,
+      archivedAt: itinerary.archivedAt ?? nowIso(),
+      updatedAt: nowIso()
+    });
+  }
+
+  delete(itineraryId: string): boolean {
+    this.get(itineraryId);
+    this.db.deleteSessionsForItinerary(itineraryId);
+    return this.db.deleteItinerary(itineraryId);
+  }
+
   addActivity(itineraryId: string, dayId: string, activity: ActivityDraft, source: Activity["source"] = "manual"): TravelItinerary {
     const itinerary = this.get(itineraryId);
     return this.db.saveItinerary(addActivity(itinerary, dayId, activity, source));
@@ -96,6 +113,17 @@ export class ItineraryService {
   setTransportLeg(itineraryId: string, dayId: string, leg: TransportLegDraft): TravelItinerary {
     const itinerary = this.get(itineraryId);
     return this.db.saveItinerary(setTransportLeg(itinerary, dayId, leg));
+  }
+
+  removeTransportLeg(
+    itineraryId: string,
+    dayId: string,
+    fromActivityId: string,
+    toActivityId: string,
+    source: Activity["source"] = "manual"
+  ): TravelItinerary {
+    const itinerary = this.get(itineraryId);
+    return this.db.saveItinerary(removeTransportLeg(itinerary, dayId, fromActivityId, toActivityId, source));
   }
 
   setDayWeather(itineraryId: string, dayId: string, weather: WeatherSummary, source: Activity["source"] = "manual"): TravelItinerary {

@@ -64,6 +64,7 @@ iter3/
 - `POST /api/skills/:id/favorite`
 - `DELETE /api/skills/:id`
 - `POST /api/agent/run`
+- `POST /api/agent/run-stream`
 - `GET /api/agent/traces`
 - `GET /api/maps/poi`
 - `POST /api/maps/route`
@@ -87,6 +88,8 @@ Agent 分工：
 
 `AgentService` 生成 trace，并通过 `applyItineraryPatch` 写回结构化行程画布。
 
+`POST /api/agent/run-stream` 使用 SSE 返回用户可理解的规划进度和最终结果。前端点击“停止”会中断请求；服务端将连接关闭转换为 `AbortSignal`，并在模型调用、工具调用和写入 SQLite 前检查取消状态，避免用户停止后仍在后台产生 session、trace 或行程变更。
+
 ### 3.4 地图服务
 
 `MapService` 以高德能力为目标封装：
@@ -95,7 +98,7 @@ Agent 分工：
 - 路线规划。
 - 天气查询。
 
-当前没有真实 Key 时返回 mock 数据。这样既能保证本地演示稳定，也能清晰保留后续替换真实高德 API 的边界。
+当前配置真实高德 Key 时会调用高德 POI、天气和方向规划接口；没有 Key 或外部服务不可用时返回 mock 数据。这样既能保证上线功能使用真实服务，也能保证本地演示和测试稳定。
 
 ## 4. 前端设计
 
@@ -127,7 +130,7 @@ Agent 分工：
 - 右侧：Agent 对话、Skill 状态栏与浏览面板、Agent 回复末尾 diff。
 
 用户可以纯手动完成完整行程规划；Agent 是可选协作入口，不是唯一入口。
-用户直接在画布上的手动编辑不计算对话 diff，只有 Agent 一轮修改会在本轮助手回复末尾追加结构化改动清单。
+用户直接在画布上的手动编辑不计算对话 diff，只有 Agent 一轮修改会在本轮助手回复末尾追加结构化改动清单。diff 项带有定位目标时，用户可以从右侧对话直接跳到中间画布对应的 Day、活动或路线。
 
 ## 5. 关键机制设计
 
@@ -142,6 +145,8 @@ Agent 不直接返回 Markdown，而是返回结构化 patch 操作：
 
 前端画布根据 patch 更新，用户可继续编辑。
 
+Agent 结果在前端保存 `changeSet` 元数据，包括 diff、参考旅行风格、撤销快照和可定位目标。定位目标由 Agent 更新前后的结构化行程比较生成，不依赖内部 trace；普通用户只看到“定位”按钮，不看到子 Agent 名称或工具参数。
+
 ### 5.2 手动编辑保护
 
 活动支持 `lockedByUser`。当 Agent 尝试修改用户锁定活动时：
@@ -150,7 +155,16 @@ Agent 不直接返回 Markdown，而是返回结构化 patch 操作：
 - 允许更新 `tags` 和 `agentReason` 等非破坏性字段。
 - 记录冲突，进入 diff/trace。
 
-### 5.3 Skill 标准化
+### 5.3 交通时间可行性
+
+交通路线不只保存距离和耗时，还会参与行程时间可行性判断。共享层提供 `detectTransportTimingConflict(from, to, leg)`：
+
+- 使用上一项活动的结束时间、路线耗时和下一项活动的开始时间计算预计到达。
+- 预计到达晚于下一项开始时，返回用户可读的时间提醒。
+- 前端路线卡和导出 Markdown 复用同一规则，避免画布和最终行程文档口径不一致。
+- 用户手动调整路线耗时后会立即看到提醒；这属于画布状态，不会生成 Agent diff。
+
+### 5.4 Skill 标准化
 
 Skill 采用 `skill-creator` 标准格式：
 
@@ -164,7 +178,7 @@ skill-name/
 
 当前代码支持解析和生成 `SKILL.md`，并支持从行程提取 draft Skill。脚本目录作为扩展能力保留，失败时降级，不中断主流程。
 
-### 5.4 评估指标
+### 5.5 评估指标
 
 评估指标包括：
 
