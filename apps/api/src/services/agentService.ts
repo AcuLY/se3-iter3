@@ -400,8 +400,7 @@ export class AgentService {
         this.trace(sessionId, "PlannerAgent", "message", "提出路线修复方案", "仅提供方案，等待用户选择后再修改画布。"),
         this.trace(sessionId, "CriticAgent", "message", "确认未修改画布", "本轮 diff 为空。")
       ];
-      const detailDiff: string[] = [];
-      const saved = this.applyConversationPreferences(itinerary, input.message, traces, sessionId, detailDiff);
+      const saved = itinerary;
       for (const trace of traces) this.db.saveTrace(trace);
       const userMessage: ChatMessage = {
         id: createId("msg"),
@@ -435,7 +434,7 @@ export class AgentService {
       return {
         itinerary: saved,
         message: assistantMessage,
-        diff: detailDiff,
+        diff: [],
         traces,
         session
       };
@@ -603,10 +602,23 @@ export class AgentService {
       saved = await this.completeMissingTransportLegs(saved, "walking", traces, sessionId, transportDiff, input.signal);
     }
     const styleDiff = activityIntent && skillInfluence ? [`已应用风格：${skillInfluence.skill.displayName}`] : [];
+    const weatherDiff: string[] = [];
+    if (
+      patched.diff.length > 0 ||
+      styleDiff.length > 0 ||
+      detailDiff.length > 0 ||
+      deterministicPlaceDiff.length > 0 ||
+      placeDiff.length > 0 ||
+      transportDiff.length > 0 ||
+      timingDiff.length > 0
+    ) {
+      saved = this.applyDeterministicWeather(saved, traces, sessionId, weatherDiff);
+    }
     const resultDiff = [
       ...patched.diff,
       ...styleDiff,
       ...detailDiff,
+      ...weatherDiff,
       ...deterministicPlaceDiff,
       ...placeDiff,
       ...transportDiff,
@@ -1072,6 +1084,35 @@ export class AgentService {
       )
     );
     diff.push(`已顺延活动：${activityDisplayName(toActivity)} 到 ${conflict.estimatedArrivalTime}`);
+    return saved;
+  }
+
+  private applyDeterministicWeather(
+    itinerary: TravelItinerary,
+    traces: AgentTraceEvent[],
+    sessionId: string,
+    diff: string[]
+  ): TravelItinerary {
+    const day = itinerary.days[0];
+    if (!day) return itinerary;
+    const weather = {
+      city: itinerary.destination,
+      date: day.date,
+      weather: "多云，适合户外步行",
+      temperature: "24-30 C",
+      source: "mock" as const
+    };
+    if (
+      day.weather?.weather === weather.weather &&
+      day.weather.temperature === weather.temperature &&
+      day.weather.source === weather.source
+    ) {
+      traces.push(this.trace(sessionId, "WeatherAgent", "message", "确认天气摘要", `${day.title} 已有天气摘要`));
+      return itinerary;
+    }
+    const saved = this.itineraries.setDayWeather(itinerary.id, day.id, weather, "agent");
+    traces.push(this.trace(sessionId, "WeatherAgent", "state_patch", "写入天气摘要", `${day.title} ${weather.weather}`));
+    diff.push(`已更新天气：Day 1 ${weather.weather}`);
     return saved;
   }
 

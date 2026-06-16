@@ -44,6 +44,16 @@ export type ApiStreamEvent = {
   data: unknown;
 };
 
+export class ApiStreamEventError extends Error {
+  constructor(
+    message: string,
+    readonly data: unknown
+  ) {
+    super(message);
+    this.name = "ApiStreamEventError";
+  }
+}
+
 export async function apiEventStream(
   path: string,
   body: unknown,
@@ -73,12 +83,12 @@ export async function apiEventStream(
     buffer = chunks.pop() ?? "";
     for (const chunk of chunks) {
       const parsed = parseEventChunk(chunk);
-      if (parsed) options.onEvent(parsed);
+      if (parsed) handleStreamEvent(parsed, options.onEvent);
     }
   }
   if (buffer.trim()) {
     const parsed = parseEventChunk(buffer);
-    if (parsed) options.onEvent(parsed);
+    if (parsed) handleStreamEvent(parsed, options.onEvent);
   }
 }
 
@@ -117,4 +127,20 @@ function parseEventChunk(chunk: string): ApiStreamEvent | undefined {
   } catch {
     return { event, data: raw };
   }
+}
+
+function handleStreamEvent(event: ApiStreamEvent, onEvent: (event: ApiStreamEvent) => void): void {
+  if (event.event === "error") {
+    throw new ApiStreamEventError(readStreamErrorMessage(event.data), event.data);
+  }
+  onEvent(event);
+}
+
+function readStreamErrorMessage(data: unknown): string {
+  if (typeof data === "string" && data.trim()) return data.trim();
+  if (data && typeof data === "object" && "message" in data) {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  return "助手暂时无法完成这次规划";
 }

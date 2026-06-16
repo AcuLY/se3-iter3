@@ -720,7 +720,7 @@ describe("Travel Skill Agent frontend", () => {
 
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     expect(editWorkspace).toHaveClass("fixed");
-    expect(editWorkspace).toHaveClass("z-[70]");
+    expect(editWorkspace).toHaveClass("z-[1100]");
     expect(screen.getByTestId("map-edit-workspace")).toHaveClass("min-h-0");
 
     const inspector = within(editWorkspace).getByTestId("map-edit-inspector");
@@ -1071,7 +1071,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByRole("button", { name: "重新规划" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑路线细节：西湖晨间散步 到 湖滨咖啡" }));
     await user.selectOptions(screen.getByLabelText("西湖晨间散步 到 湖滨咖啡 的交通方式"), "driving");
-    await user.click(screen.getByRole("button", { name: "重新规划" }));
+    await user.click(screen.getByRole("button", { name: "重新规划路线" }));
 
     await waitFor(() => {
       expect(screen.getByText("Day 1 · 2 个地点 · 1 段交通 · 3.6 km · 12 分钟")).toBeInTheDocument();
@@ -2491,6 +2491,7 @@ describe("Travel Skill Agent frontend", () => {
   });
 
   it("shows user-facing assistant progress and lets the user stop a running request", async () => {
+    const requestText = "帮我补全 Day 2 下午，节奏轻松一点。";
     vi.stubGlobal(
       "fetch",
       vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
@@ -2505,7 +2506,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.type(screen.getByLabelText("对行程的修改需求"), requestText);
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(screen.getByText("正在处理行程")).toBeInTheDocument();
@@ -2515,6 +2516,46 @@ describe("Travel Skill Agent frontend", () => {
     await waitFor(() => {
       expect(screen.getAllByText("已停止本次处理，行程没有改动。").length).toBeGreaterThan(0);
     });
+    expect(within(screen.getByTestId("agent-message-scroll")).getByText(requestText)).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "本轮改动" })).not.toBeInTheDocument();
+    expect(screen.queryByText("慢节奏街区探索")).not.toBeInTheDocument();
+  });
+
+  it("shows streamed assistant errors without applying local fallback changes", async () => {
+    let agentRunCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              'event: progress\ndata: {"message":"正在检查地点和路线"}',
+              'event: error\ndata: {"message":"路线服务暂时不可用，请稍后重试。"}',
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        if (url.includes("/api/agent/run")) {
+          agentRunCalls += 1;
+          return new Response("Should not call fallback run", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("路线服务暂时不可用，请稍后重试。")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "本轮改动" })).not.toBeInTheDocument();
+    expect(screen.queryByText("慢节奏街区探索")).not.toBeInTheDocument();
+    expect(agentRunCalls).toBe(0);
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
   });
 });
 

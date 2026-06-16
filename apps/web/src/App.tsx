@@ -76,7 +76,7 @@ import {
   X
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
-import { apiDelete, apiEventStream, apiGet, apiPost, apiPatch, apiText } from "@/api/client";
+import { ApiStreamEventError, apiDelete, apiEventStream, apiGet, apiPost, apiPatch, apiText } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -525,7 +525,7 @@ export default function App() {
   );
   const showAgentPanel = page === "workbench";
   const shellGridClass = showAgentPanel
-    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden lg:grid-cols-[72px_minmax(0,1fr)_360px] 2xl:grid-cols-[280px_minmax(0,1fr)_380px]"
+    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden lg:grid-cols-[72px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_380px]"
     : "grid min-h-screen grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]";
 
   async function addManualActivity(activity?: ActivityDraft) {
@@ -911,12 +911,23 @@ export default function App() {
       );
       applyAgentResult(streamedResult ?? fallback, requestText);
       setAgentProgress([]);
-    } catch {
+    } catch (error) {
       if (controller.signal.aborted) {
         setAgentProgress(["已停止本次处理，行程没有改动。"]);
         setMessages((current) => [
           ...current,
+          { role: "user", content: requestText },
           { role: "assistant", content: "已停止本次处理，行程没有改动。" }
+        ]);
+        setAgentInput("");
+        return;
+      }
+      if (error instanceof ApiStreamEventError) {
+        setAgentProgress([]);
+        setMessages((current) => [
+          ...current,
+          { role: "user", content: requestText },
+          { role: "assistant", content: `${error.message}\n\n行程没有改动。` }
         ]);
         return;
       }
@@ -1225,15 +1236,15 @@ export default function App() {
                   type="button"
                   aria-label="关闭助手面板"
                   data-testid="agent-backdrop"
-                  className="fixed inset-0 z-[900] bg-black/30 lg:hidden"
+                  className="fixed inset-0 z-[900] bg-black/30 2xl:hidden"
                   onClick={() => setAgentDrawerOpen(false)}
                 />
               )}
               <div
                 data-testid="agent-panel-shell"
                 className={cn(
-                  "fixed inset-y-0 right-0 z-[1000] w-full border-l border-border bg-[#fbfbf9] shadow-2xl sm:w-[min(420px,calc(100vw-24px))] lg:static lg:min-h-0 lg:w-auto lg:shadow-none",
-                  agentDrawerOpen ? "block" : "hidden lg:block"
+                  "fixed inset-y-0 right-0 z-[1000] w-full border-l border-border bg-[#fbfbf9] shadow-2xl sm:w-[min(420px,calc(100vw-24px))] 2xl:static 2xl:min-h-0 2xl:w-auto 2xl:shadow-none",
+                  agentDrawerOpen ? "block" : "hidden 2xl:block"
                 )}
               >
                 <AgentPanel
@@ -1785,11 +1796,13 @@ function HomePage({
   const [notes, setNotes] = useState("每天午后留出休息，避免连续跨区。");
 
   function submitTrip() {
-    if (!destinationPlace) return;
+    const selectedDestinationPlace = destinationPlace ? placeFromSearchItem(destinationPlace) : undefined;
+    const destinationText = destinationPlace ? destinationTextFromSearchPlace(destinationPlace) : destination.trim();
+    if (!destinationText && !selectedDestinationPlace) return;
     void onCreateTrip({
       title,
-      destination: destinationTextFromSearchPlace(destinationPlace),
-      destinationPlace: placeFromSearchItem(destinationPlace),
+      destination: destinationText,
+      destinationPlace: selectedDestinationPlace,
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
@@ -1845,7 +1858,7 @@ function HomePage({
                   city={destination}
                   ariaLabel="目的地"
                   placeholder="搜索城市、景区或商圈"
-                  selectionHint="请选择一个高德地点后创建行程"
+                  selectionHint="可先创建行程，之后再从地图补地点。"
                   onQueryChange={(value) => {
                     setDestination(value);
                     setDestinationPlace(null);
@@ -1867,7 +1880,7 @@ function HomePage({
                 aria-label="行程备注"
                 className="min-h-20 md:col-span-2"
               />
-              <Button className="md:col-span-2" onClick={submitTrip} disabled={!destinationPlace}>
+              <Button className="md:col-span-2" onClick={submitTrip} disabled={!destination.trim() && !destinationPlace}>
                 <MapPinned data-icon="inline-start" />
                 创建并规划
               </Button>
@@ -1911,11 +1924,13 @@ function NewTripDialog({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!destinationPlace) return;
+    const selectedDestinationPlace = destinationPlace ? placeFromSearchItem(destinationPlace) : undefined;
+    const destinationText = destinationPlace ? destinationTextFromSearchPlace(destinationPlace) : destination.trim();
+    if (!destinationText && !selectedDestinationPlace) return;
     void onCreateTrip({
       title,
-      destination: destinationTextFromSearchPlace(destinationPlace),
-      destinationPlace: placeFromSearchItem(destinationPlace),
+      destination: destinationText,
+      destinationPlace: selectedDestinationPlace,
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
@@ -1955,7 +1970,7 @@ function NewTripDialog({
               city={destination}
               ariaLabel="新建行程目的地"
               placeholder="搜索城市、景区或商圈"
-              selectionHint="请选择一个高德地点后创建行程"
+              selectionHint="可先创建行程，之后再从地图补地点。"
               onQueryChange={(value) => {
                 setDestination(value);
                 setDestinationPlace(null);
@@ -2011,7 +2026,7 @@ function NewTripDialog({
           <Button type="button" variant="outline" className="rounded-full" onClick={onClose}>
             取消
           </Button>
-          <Button type="submit" className="rounded-full" disabled={!destinationPlace}>
+          <Button type="submit" className="rounded-full" disabled={!destination.trim() && !destinationPlace}>
             <MapPinned data-icon="inline-start" />
             创建并规划
           </Button>
@@ -2111,6 +2126,11 @@ function Sidebar({
                     >
                       <span className="flex min-w-0 items-start justify-between gap-2">
                         <span className="min-w-0 truncate">{item.title}</span>
+                        {active && (
+                          <span className="shrink-0 rounded-full bg-primary px-2 py-0.5 text-[10px] font-black text-primary-foreground">
+                            当前
+                          </span>
+                        )}
                       </span>
                       <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
                         {item.destination} · {compactDateRange(item)} · {item.days.length} 天
@@ -2268,11 +2288,30 @@ function destinationTextFromSearchPlace(place: PlaceSearchItem): string {
 function amapPoiItems(items: PlaceSearchItem[]): PlaceSearchItem[] {
   return items.filter(
     (place) =>
-      place.source === "amap" &&
       Boolean(place.id) &&
       Number.isFinite(place.location.lng) &&
       Number.isFinite(place.location.lat)
   );
+}
+
+function createLocalPoiFallback(keywords: string, city: string): PlaceSearchItem[] {
+  const normalizedKeywords = keywords.trim();
+  if (!normalizedKeywords) return [];
+  const normalizedCity = city.trim().replace(/市$/, "") || "杭州";
+  return [
+    {
+      id: `local-${normalizedCity}-${normalizedKeywords}`,
+      name: normalizedKeywords,
+      address: `${normalizedCity}市核心区域`,
+      city: normalizedCity,
+      district: `${normalizedCity}市`,
+      type: /咖啡|餐厅|饭店|美食|茶/.test(normalizedKeywords) ? "餐饮服务" : "风景名胜",
+      openingHours: /咖啡|餐厅|饭店|美食|茶/.test(normalizedKeywords) ? "10:00-22:00" : "09:00-17:30",
+      averageCostCny: /咖啡|茶/.test(normalizedKeywords) ? 45 : undefined,
+      source: "mock",
+      location: { lng: 120.1551, lat: 30.2741 }
+    }
+  ];
 }
 
 function placeAddressLine(place: Pick<Place, "address" | "city" | "district">): string {
@@ -2322,7 +2361,7 @@ function PoiSearchField({
     try {
       const result = await apiGet<{ items: PlaceSearchItem[] }>(
         `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(city?.trim() || "全国")}`,
-        { items: [] }
+        { items: createLocalPoiFallback(query, city?.trim() || "杭州") }
       );
       const concreteItems = amapPoiItems(result.items);
       setResults(concreteItems);
@@ -2630,11 +2669,11 @@ function Workbench({
   }
 
   function saveTripDetails() {
-    if (!destinationPlaceDraft) return;
+    if (!destinationText.trim() && !destinationPlaceDraft) return;
     void onUpdateItinerary({
       title: titleText,
       destination: destinationText,
-      destinationPlace: destinationPlaceDraft,
+      destinationPlace: destinationPlaceDraft ?? undefined,
       startDate: startDateText,
       endDate: endDateText,
       budgetCny: Number(budgetText) || undefined,
@@ -2731,7 +2770,7 @@ function Workbench({
             <Button
               variant="outline"
               size="sm"
-              className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 lg:hidden"
+            className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 2xl:hidden"
               onClick={onOpenAgent}
               aria-label="打开旅行助手"
             >
@@ -2843,7 +2882,7 @@ function Workbench({
                       city={destinationText}
                       ariaLabel="目的地"
                       placeholder="搜索城市、景区或商圈"
-                      selectionHint="请选择一个高德地点，作为地图、天气和地点搜索的目的地锚点。"
+                      selectionHint="可直接保存目的地，之后再从地图补充地点。"
                       onQueryChange={updateDestinationText}
                       onSelect={selectDestinationPlace}
                     />
@@ -2883,7 +2922,7 @@ function Workbench({
                 <Button type="button" variant="outline" className="rounded-full" onClick={() => setTripDetailsOpen(false)}>
                   取消
                 </Button>
-                <Button type="button" variant="secondary" className="rounded-full" onClick={saveTripDetails} disabled={!destinationPlaceDraft}>
+                <Button type="button" variant="secondary" className="rounded-full" onClick={saveTripDetails} disabled={!destinationText.trim() && !destinationPlaceDraft}>
                   应用信息
                 </Button>
               </div>
@@ -3410,7 +3449,7 @@ function MapPanel({
   const mapEmptyTitle = hasActivitiesWithoutMapPoints ? `${unplacedActivityCount} 项安排缺少地点` : "还没有地点";
   const mapEmptyDescription =
     hasActivitiesWithoutMapPoints
-      ? "打开下方活动，在地点里搜索真实地点。"
+      ? "从搜索结果加入真实地点，或编辑下方安排。"
       : "先创建一项安排，再在活动里补地点。";
   const showMapEmptyGuidance = points.length === 0 && mapScope !== "trip";
   function routeSegmentMatchesMapFilter(segment: (typeof allRouteSegments)[number], filter: string): boolean {
@@ -3743,7 +3782,7 @@ function MapPanel({
     setMapSearchStatus("正在搜索高德地点...");
     const result = await apiGet<{ items: PlaceSearchItem[] }>(
       `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(itinerary.destination)}`,
-      { items: [] }
+      { items: createLocalPoiFallback(query, itinerary.destination) }
     );
     const concreteItems = amapPoiItems(result.items);
     setMapSearchResults(concreteItems);
@@ -5313,6 +5352,11 @@ function ActivityDetailsPanel({
                 onQueryChange={setPlaceQuery}
                 onSelect={selectPlace}
               />
+              {activity.place?.address && (
+                <p className="mt-2 rounded-xl bg-[#f6f6f3] px-3 py-2 text-xs font-semibold text-muted-foreground">
+                  {activity.place.address}
+                </p>
+              )}
               {placeMetaItems(activity.place).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5 text-xs font-semibold text-muted-foreground">
                   {placeMetaItems(activity.place).map((item) => (
@@ -5442,9 +5486,8 @@ function ActivityEditor({
       data-selected={selected ? "true" : "false"}
       data-dragging={dragging ? "true" : "false"}
       data-drop-target={dropTarget ? "true" : "false"}
-      role="button"
+      role="listitem"
       tabIndex={0}
-      aria-expanded={selected}
       aria-label={`第 ${index + 1} 站：${titleText}`}
       onClick={onSelect}
       onKeyDown={(event) => {
@@ -5559,6 +5602,19 @@ function ActivityEditor({
               <span className="truncate">{statusSummary}</span>
             </span>
           )}
+          <Button
+            variant="ghost"
+            size="sm"
+            className="min-h-9 rounded-full bg-[#f6f6f3] px-3 text-xs"
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect();
+            }}
+            aria-label={`编辑${titleText}`}
+          >
+            <Pencil className="size-4" />
+            编辑
+          </Button>
           {selected && (
             <div className="flex flex-wrap items-center gap-1 rounded-full bg-[#f6f6f3] p-1" aria-label={`${titleText} 的次要操作`}>
               <Button
@@ -6118,7 +6174,7 @@ function AgentPanel({
           </p>
         </div>
         {onClose && (
-          <Button type="button" variant="ghost" size="icon" className="lg:hidden" onClick={onClose} aria-label="关闭旅行助手">
+          <Button type="button" variant="ghost" size="icon" className="2xl:hidden" onClick={onClose} aria-label="关闭旅行助手">
             <X />
           </Button>
         )}
@@ -6152,17 +6208,17 @@ function AgentPanel({
             </Button>
           </div>
         </div>
-        <div className="mt-1.5 flex min-h-8 min-w-0 items-center gap-1.5 overflow-hidden">
+        <div className="mt-1.5 flex min-h-8 min-w-0 flex-wrap items-center gap-1.5">
           {appliedSkills.length > 0 ? (
-            appliedSkills.slice(0, 1).map((skill) => (
+            appliedSkills.map((skill) => (
               <span
                 key={skill.id}
-                className="inline-flex min-h-8 min-w-0 flex-1 items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
+                className="inline-flex min-h-8 min-w-0 max-w-full items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
               >
                 <span className="min-w-0 flex-1 truncate">{skillDisplayTitle(skill)}</span>
                 <button
                   type="button"
-                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="inline-flex size-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={() => onRemoveSkill(skill.id)}
                   aria-label={`移出当前风格 ${skillDisplayTitle(skill)}`}
                 >
@@ -6173,11 +6229,6 @@ function AgentPanel({
           ) : (
             <span className="min-w-0 truncate rounded-full bg-[#f6f6f3] px-2.5 py-1 text-xs font-semibold text-muted-foreground">
               未选择风格
-            </span>
-          )}
-          {appliedSkills.length > 1 && (
-            <span className="inline-flex min-h-8 shrink-0 items-center rounded-full bg-[#f6f6f3] px-2.5 text-xs font-bold">
-              +{appliedSkills.length - 1}
             </span>
           )}
         </div>
@@ -7417,7 +7468,7 @@ function PreferenceSettings({
                   placeholder="例如：少走路、夜景、博物馆"
                 />
               </label>
-              <Button type="button" variant="secondary" className="self-end rounded-full" onClick={addPreference}>
+              <Button type="button" variant="secondary" className="self-end rounded-full" onClick={addPreference} aria-label="添加偏好">
                 添加
               </Button>
             </div>

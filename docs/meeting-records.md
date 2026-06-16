@@ -57,8 +57,8 @@
 ### 结论
 
 - 新建 `iter3/`，不直接沿用迭代二 Python 主线。
-- Agent 框架方向为 OpenAI Agents SDK for TypeScript，当前实现保留依赖和适配点。
-- 外部 API 默认有 mock fallback，保证演示稳定。
+- Agent 在线路径以 DeepSeek Chat Completions tool calls 为主，服务端保留可替换适配层。
+- 外部 API 默认有本地确定性 fallback，保证演示稳定。
 
 ## 会议 4：实现与验证复盘
 
@@ -76,6 +76,6 @@
 
 ### 风险与后续
 
-- 当前 OpenAI/Amap 接入为可替换适配点，默认走 mock。
-- 答辩时需说明 mock 是为了无 Key 场景稳定演示，不影响架构扩展。
-- 若继续深挖，可补真实 Amap Key、OpenAI Agent 在线调用和 Skill 脚本沙箱。
+- 当前 DeepSeek/高德接入为可替换适配点，失败时走本地 fallback。
+- 答辩时需说明 fallback 是为了无 Key 场景稳定演示，不影响真实服务接入。
+- 若继续深挖，可补更多模型适配、真实线上部署和 Skill 脚本沙箱。

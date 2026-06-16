@@ -16,7 +16,7 @@ iter3/
   docs/              需求、设计、会议、优化和答辩材料
 ```
 
-前端通过 REST API 与后端通信。为保证答辩演示稳定，前端保留离线 fallback，后端在没有 OpenAI Key 或高德 Key 时使用确定性 mock。
+前端通过 REST API 与后端通信。为保证答辩演示稳定，前端保留离线 fallback；后端在没有 DeepSeek Key、高德 Key 或外部服务失败时使用本地确定性降级路径。
 
 ## 2. 共享领域层
 
@@ -74,7 +74,7 @@ iter3/
 
 ### 3.3 Agent 编排
 
-当前实现是可测试的确定性编排服务，同时保留 OpenAI Agents SDK for TypeScript 的依赖方向和接入点。
+当前实现以 `AgentService` 作为主编排入口：优先走 DeepSeek Chat Completions tool calls，失败或未配置 Key 时进入确定性降级路径。服务内部记录主/子 Agent trace，用于评估后台和答辩证据，不直接暴露给普通用户。
 
 Agent 分工：
 
@@ -98,7 +98,7 @@ Agent 分工：
 - 路线规划。
 - 天气查询。
 
-当前配置真实高德 Key 时会调用高德 POI、天气和方向规划接口；没有 Key 或外部服务不可用时返回 mock 数据。这样既能保证上线功能使用真实服务，也能保证本地演示和测试稳定。
+当前配置真实高德 Key 时会调用高德 POI、天气和方向规划接口；没有 Key 或外部服务不可用时返回本地可解释 fallback。这样既能保证上线功能使用真实服务，也能保证本地演示和测试稳定。
 
 ## 4. 前端设计
 
