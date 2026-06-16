@@ -1739,6 +1739,7 @@ function isAgentName(value: unknown): value is AgentTraceEvent["agent"] {
     value === "TransportAgent" ||
     value === "AttractionAgent" ||
     value === "PlannerAgent" ||
+    value === "ContextAgent" ||
     value === "CriticAgent"
   );
 }
@@ -8871,6 +8872,7 @@ function summarizeAgentTraces(traces: AgentTraceEvent[]): Array<{ name: AgentTra
     "PlannerAgent",
     "AttractionAgent",
     "TransportAgent",
+    "ContextAgent",
     "CriticAgent"
   ];
   return agents.map((agent) => {
@@ -8893,6 +8895,7 @@ function agentLabel(agent: AgentTraceEvent["agent"]): string {
     TransportAgent: "交通 Agent",
     AttractionAgent: "地点 Agent",
     PlannerAgent: "规划 Agent",
+    ContextAgent: "上下文 Agent",
     CriticAgent: "校验 Agent"
   };
   return labels[agent];

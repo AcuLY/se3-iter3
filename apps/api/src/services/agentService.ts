@@ -114,10 +114,60 @@ export class AgentService {
     const memorySnapshotText = this.memories.buildSnapshotText();
     const sessionId = createId("session");
     const context = this.createRunContext(sessionId, options);
+    let compactionEventId: string | undefined;
     const priorContext = await this.conversationContext.build({
       itineraryId: input.itineraryId,
       modelConfig,
-      signal: input.signal
+      signal: input.signal,
+      onProgress: (progress) => {
+        if (progress.phase === "started") {
+          if (progress.cached) {
+            // Cache hit — nothing was actually summarized this round; skip the
+            // "压缩中" indicator entirely so the user only sees real work.
+            return;
+          }
+          const event = this.emitRunEvent(
+            context,
+            0,
+            "tool_call",
+            "running",
+            "压缩历史对话",
+            `正在压缩 ${progress.olderSessionCount} 轮对话（约 ${formatTokens(progress.olderTokens)} tokens）以腾出上下文……`,
+            "ContextAgent",
+            { input: { olderSessions: progress.olderSessionCount, olderTokens: progress.olderTokens } }
+          );
+          compactionEventId = event.id;
+        } else if (progress.phase === "completed") {
+          if (!compactionEventId) return;
+          this.emitRunEvent(
+            context,
+            0,
+            "tool_result",
+            "completed",
+            "压缩历史对话完成",
+            `已将 ${progress.olderSessionCount} 轮历史压缩为 ${progress.summaryLength} 字摘要，保留近 ${progress.recentSessionCount} 轮原文。`,
+            "ContextAgent",
+            {
+              output: {
+                olderSessions: progress.olderSessionCount,
+                summaryLength: progress.summaryLength,
+                recentSessions: progress.recentSessionCount,
+                cached: progress.cached
+              }
+            }
+          );
+        } else if (progress.phase === "failed") {
+          this.emitRunEvent(
+            context,
+            0,
+            "error",
+            "failed",
+            "压缩历史对话失败",
+            progress.reason,
+            "ContextAgent"
+          );
+        }
+      }
     });
     throwIfAborted(input.signal);
     const traces: AgentTraceEvent[] = [
@@ -2569,6 +2619,11 @@ function readAgentMaxTurns(): number {
   const configured = Number(process.env.AGENT_MAX_TURNS);
   if (Number.isInteger(configured) && configured > 0) return Math.min(configured, 50);
   return 12;
+}
+
+function formatTokens(tokens: number): string {
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(1)}K`;
+  return String(tokens);
 }
 
 function summarizeToolInput(toolName: string, parsed: Record<string, unknown>): string {

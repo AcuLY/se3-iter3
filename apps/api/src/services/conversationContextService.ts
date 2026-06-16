@@ -6,8 +6,8 @@ import {
   requestChatCompletion
 } from "./chatCompletionClient.js";
 
-const DEFAULT_RECENT_TURNS = 4;
-const DEFAULT_MAX_HISTORY_TOKENS = 12_000;
+const DEFAULT_RECENT_TURNS = 10;
+const DEFAULT_MAX_HISTORY_TOKENS = 120_000;
 const SUMMARY_PREFIX = "[历史摘要] ";
 
 export type ConversationContextOptions = {
@@ -15,10 +15,38 @@ export type ConversationContextOptions = {
   maxHistoryTokens?: number;
 };
 
+export type CompactionProgressEvent =
+  | {
+      phase: "started";
+      olderSessionCount: number;
+      olderTokens: number;
+      recentSessionCount: number;
+      cached: boolean;
+    }
+  | {
+      phase: "completed";
+      olderSessionCount: number;
+      olderTokens: number;
+      recentSessionCount: number;
+      cached: boolean;
+      summaryLength: number;
+    }
+  | {
+      phase: "failed";
+      olderSessionCount: number;
+      olderTokens: number;
+      recentSessionCount: number;
+      reason: string;
+    };
+
 export type BuildContextResult = {
   messages: ChatCompletionMessage[];
   summarizedSessionIds: string[];
   summary?: string;
+  /** Total token estimate of all prior turns, before any compaction. */
+  historyTokens: number;
+  /** Whether compaction (cache hit OR fresh LLM summary) was applied. */
+  compacted: boolean;
 };
 
 /**
@@ -43,10 +71,11 @@ export class ConversationContextService {
     itineraryId: string;
     modelConfig: ChatCompletionModelConfig;
     signal?: AbortSignal;
+    onProgress?: (event: CompactionProgressEvent) => void;
   }): Promise<BuildContextResult> {
     const sessions = this.loadPriorSessions(input.itineraryId);
     if (sessions.length === 0) {
-      return { messages: [], summarizedSessionIds: [] };
+      return { messages: [], summarizedSessionIds: [], historyTokens: 0, compacted: false };
     }
 
     const recentTurns = this.options.recentTurns ?? DEFAULT_RECENT_TURNS;
@@ -58,7 +87,9 @@ export class ConversationContextService {
     if (totalTokens <= maxTokens) {
       return {
         messages: allMessages.map(toCompletionMessage),
-        summarizedSessionIds: []
+        summarizedSessionIds: [],
+        historyTokens: totalTokens,
+        compacted: false
       };
     }
 
@@ -72,20 +103,60 @@ export class ConversationContextService {
       // Nothing left to summarize after carving out the recent window.
       return {
         messages: recentSessions.flatMap((session) => session.messages.map(toCompletionMessage)),
-        summarizedSessionIds: []
+        summarizedSessionIds: [],
+        historyTokens: totalTokens,
+        compacted: false
       };
     }
 
     const summarizedIds = olderSessions.map((session) => session.id);
     const cachedSummary = findCachedSummary(sessions, summarizedIds);
-    const summary = cachedSummary ?? (await this.summarize(olderSessions, input.modelConfig, input.signal));
+    const olderTokens = estimateTokens(olderSessions.flatMap((session) => session.messages));
+
+    input.onProgress?.({
+      phase: "started",
+      olderSessionCount: olderSessions.length,
+      olderTokens,
+      recentSessionCount: recentSessions.length,
+      cached: Boolean(cachedSummary)
+    });
+
+    let summary: string;
+    try {
+      summary = cachedSummary ?? (await this.summarize(olderSessions, input.modelConfig, input.signal));
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "未知错误";
+      input.onProgress?.({
+        phase: "failed",
+        olderSessionCount: olderSessions.length,
+        olderTokens,
+        recentSessionCount: recentSessions.length,
+        reason
+      });
+      throw error;
+    }
+
+    input.onProgress?.({
+      phase: "completed",
+      olderSessionCount: olderSessions.length,
+      olderTokens,
+      recentSessionCount: recentSessions.length,
+      cached: Boolean(cachedSummary),
+      summaryLength: summary.length
+    });
 
     const messages: ChatCompletionMessage[] = [
       { role: "system", content: `${SUMMARY_PREFIX}${summary}` },
       ...recentSessions.flatMap((session) => session.messages.map(toCompletionMessage))
     ];
 
-    return { messages, summarizedSessionIds: summarizedIds, summary };
+    return {
+      messages,
+      summarizedSessionIds: summarizedIds,
+      summary,
+      historyTokens: totalTokens,
+      compacted: true
+    };
   }
 
   private loadPriorSessions(itineraryId: string): AgentSession[] {
@@ -113,7 +184,7 @@ export class ConversationContextService {
           {
             role: "system",
             content:
-              "你将一段旅行规划的多轮对话压缩成不超过 300 字的中文摘要。要求：保留用户偏好/已确定的安排/未解决的待办；不要罗列具体工具名；不要使用列表或 markdown，只用一段话。"
+              "你将一段旅行规划的多轮对话压缩成不超过 600 字的中文摘要。要求：保留用户偏好/已确定的安排/未解决的待办；不要罗列具体工具名；不要使用列表或 markdown，只用连续段落。"
           },
           {
             role: "user",

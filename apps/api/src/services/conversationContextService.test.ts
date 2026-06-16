@@ -177,5 +177,86 @@ describe("ConversationContextService", () => {
 
     expect(result.summary).toBe("之前的杭州偏好已记录。");
     expect(result.messages[0]?.content).toBe("[历史摘要] 之前的杭州偏好已记录。");
+    expect(result.compacted).toBe(true);
+  });
+
+  it("emits onProgress events around a fresh LLM compaction so callers can render a UI indicator", async () => {
+    const longUser = "长文本".repeat(2000);
+    const longAssistant = "长回复".repeat(2000);
+    const sessions = Array.from({ length: 6 }, (_, index) =>
+      makeSession(`s${index + 1}`, "it-progress", `2026-06-10T10:0${index}:00.000Z`, [
+        { user: `${longUser}-${index}`, assistant: `${longAssistant}-${index}` }
+      ])
+    );
+    const service = new ConversationContextService(
+      { listSessions: () => sessions } as never,
+      { recentTurns: 2, maxHistoryTokens: 5_000 }
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "压缩后的摘要。" } }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const events: Array<{ phase: string; cached?: boolean; summaryLength?: number }> = [];
+    const result = await service.build({
+      itineraryId: "it-progress",
+      modelConfig: MODEL_CONFIG,
+      onProgress: (event) => {
+        events.push({
+          phase: event.phase,
+          cached: "cached" in event ? event.cached : undefined,
+          summaryLength: "summaryLength" in event ? event.summaryLength : undefined
+        });
+      }
+    });
+
+    vi.unstubAllGlobals();
+
+    expect(events).toEqual([
+      { phase: "started", cached: false, summaryLength: undefined },
+      { phase: "completed", cached: false, summaryLength: "压缩后的摘要。".length }
+    ]);
+    expect(result.compacted).toBe(true);
+    expect(result.historyTokens).toBeGreaterThan(5_000);
+  });
+
+  it("does NOT emit a started event when the cache lets us skip the LLM call", async () => {
+    const longUser = "长".repeat(4000);
+    const sessions = [
+      makeSession("s1", "it-cache2", "2026-06-10T10:00:00.000Z", [{ user: longUser, assistant: longUser }]),
+      makeSession("s2", "it-cache2", "2026-06-10T10:01:00.000Z", [{ user: longUser, assistant: longUser }]),
+      makeSession(
+        "s3",
+        "it-cache2",
+        "2026-06-10T10:02:00.000Z",
+        [{ user: longUser, assistant: longUser }],
+        { historicalContextSummary: "缓存摘要。" }
+      )
+    ];
+    const service = new ConversationContextService(
+      { listSessions: () => sessions } as never,
+      { recentTurns: 1, maxHistoryTokens: 1_000 }
+    );
+
+    const events: Array<{ phase: string; cached?: boolean }> = [];
+    await service.build({
+      itineraryId: "it-cache2",
+      modelConfig: MODEL_CONFIG,
+      onProgress: (event) => {
+        events.push({ phase: event.phase, cached: "cached" in event ? event.cached : undefined });
+      }
+    });
+
+    // started fires with cached:true, completed fires with cached:true. The
+    // CALLER can choose to skip rendering when cached:true; the service still
+    // surfaces both phases for observability.
+    expect(events.map((e) => e.phase)).toEqual(["started", "completed"]);
+    expect(events.every((e) => e.cached === true)).toBe(true);
   });
 });

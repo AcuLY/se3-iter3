@@ -259,6 +259,7 @@ export type AgentName =
   | "TransportAgent"
   | "AttractionAgent"
   | "PlannerAgent"
+  | "ContextAgent"
   | "CriticAgent";
 
 export type AgentTraceEvent = {
