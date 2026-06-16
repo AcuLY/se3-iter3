@@ -1,8 +1,112 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { addActivity, createDraftItinerary, createSeedItinerary, createSeedSkills, exportItineraryMarkdown } from "@journey/shared";
+import {
+  addActivity,
+  createDraftItinerary,
+  createSeedItinerary,
+  createSeedSkills,
+  exportItineraryMarkdown,
+  setTransportLeg,
+  type SkillCreatorSession,
+  type SkillCreatorTurn,
+  type TravelSkill
+} from "@journey/shared";
 import App from "./App";
+
+type TestAgentRunEvent = {
+  id: string;
+  sessionId: string;
+  turnIndex: number;
+  sequence: number;
+  type:
+    | "thought_summary"
+    | "assistant_message"
+    | "tool_call"
+    | "tool_result"
+    | "state_patch"
+    | "handoff"
+    | "error"
+    | "final_signal";
+  status: "running" | "completed" | "failed";
+  title: string;
+  detail: string;
+  agent?: string;
+  technical?: unknown;
+  createdAt: string;
+};
+
+function testAgentRunEvent(overrides: Partial<TestAgentRunEvent> & Pick<TestAgentRunEvent, "sequence" | "type" | "title" | "detail">) {
+  return {
+    id: `event-${overrides.sequence}`,
+    sessionId: "session-agent-run",
+    turnIndex: 1,
+    status: "completed" as const,
+    createdAt: "2026-06-16T08:00:00.000Z",
+    ...overrides
+  };
+}
+
+function sseChunk(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}`;
+}
+
+const creatorTimestamp = "2026-06-16T08:00:00.000Z";
+
+function creatorDraft(overrides: Partial<TravelSkill> = {}): TravelSkill {
+  return {
+    id: "skill-seaside-shop-style",
+    name: "seaside-shop-style",
+    displayName: "海边小店松弛风格",
+    description: "适合看海、逛小店、保留傍晚松弛时间的旅行风格。",
+    body: "把看海、散步和小店停留作为核心体验。",
+    tags: ["海边", "小店", "松弛"],
+    rules: ["每天最多两个核心安排", "傍晚留给小店和日落"],
+    forbidden: ["避免连续跨区", "不要午后暴晒长距离步行"],
+    status: "draft",
+    source: "extracted",
+    imports: 0,
+    favorites: 0,
+    favorited: false,
+    createdAt: creatorTimestamp,
+    updatedAt: creatorTimestamp,
+    ...overrides
+  };
+}
+
+function creatorTurn(overrides: Partial<SkillCreatorTurn> = {}): SkillCreatorTurn {
+  return {
+    assistantMessage: "",
+    question: "这套旅行风格最适合在哪类请求里触发？",
+    mode: "single",
+    options: [
+      { id: "first-visit", label: "第一次到海边城市" },
+      { id: "slow-shop", label: "想慢慢逛小店" },
+      { id: "sunset", label: "傍晚看日落" }
+    ],
+    customPlaceholder: "也可以写自己的触发场景",
+    progressPercent: 25,
+    draftPatch: {},
+    done: false,
+    ...overrides
+  };
+}
+
+function creatorSession(overrides: Partial<SkillCreatorSession> = {}): SkillCreatorSession {
+  const draft = overrides.draft ?? creatorDraft();
+  const currentTurn = overrides.currentTurn ?? creatorTurn();
+  return {
+    id: "creator-session-1",
+    sourceText: "海边散步、傍晚小店、不要赶路。",
+    draft,
+    currentTurn,
+    history: [],
+    status: currentTurn.done ? "ready" : "active",
+    createdAt: creatorTimestamp,
+    updatedAt: creatorTimestamp,
+    ...overrides
+  };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -200,7 +304,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "厦门亲子四日" })).toBeInTheDocument();
-    expect(screen.getByText("厦门 / 2026-08-10 至 2026-08-13 / 4 天")).toBeInTheDocument();
+    expect(screen.getByText("出发点 厦门 / 2026-08-10 至 2026-08-13 / 4 天")).toBeInTheDocument();
     const currentTripEntry = screen.getByRole("button", { name: "当前行程：厦门亲子四日" });
     expect(currentTripEntry).toBeInTheDocument();
     expect(within(currentTripEntry).queryByText(/^当前：/)).not.toBeInTheDocument();
@@ -343,7 +447,7 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "新建行程" }));
     const dialog = screen.getByRole("dialog", { name: "新建行程" });
     await user.type(within(dialog).getByLabelText("新建行程名称"), "上海亲子周末");
-    await user.type(within(dialog).getByLabelText("新建行程目的地"), "上海");
+    await user.type(within(dialog).getByLabelText("新建行程出发点"), "上海");
     fireEvent.change(within(dialog).getByLabelText("新建行程出发日期"), { target: { value: "2026-08-01" } });
     fireEvent.change(within(dialog).getByLabelText("新建行程返回日期"), { target: { value: "2026-08-04" } });
     await user.type(within(dialog).getByLabelText("新建行程预算"), "3200");
@@ -356,10 +460,10 @@ describe("Travel Skill Agent frontend", () => {
       expect(screen.queryByRole("dialog", { name: "新建行程" })).not.toBeInTheDocument();
     });
     expect(screen.getByRole("heading", { name: "上海亲子周末" })).toBeInTheDocument();
-    expect(screen.getByText("上海 / 2026-08-01 至 2026-08-04 / 4 天")).toBeInTheDocument();
+    expect(screen.getByText("出发点 上海 / 2026-08-01 至 2026-08-04 / 4 天")).toBeInTheDocument();
     expect(screen.getByText("同行 家人、孩子")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Day 4" })).toBeInTheDocument();
-    expect(screen.getByText("上海 · 4 天 · 预算 3200 元")).toBeInTheDocument();
+    expect(screen.getByText("出发点 上海 · 4 天 · 预算 3200 元")).toBeInTheDocument();
     expect(screen.getByText("这一天还没有安排")).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "杭州三日松弛游" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "打开行程：杭州三日松弛游" })).toBeInTheDocument();
@@ -465,7 +569,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByTestId("map-search-preview-status")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑灵隐寺" }));
     expect(screen.getByLabelText("第 3 项活动名称")).toHaveValue("灵隐寺");
-    expect(screen.getAllByText("杭州市核心区域").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("全国范围").length).toBeGreaterThan(0);
   });
 
   it("lets a user fill the selected activity from map search without adding another activity", async () => {
@@ -580,6 +684,217 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(lingyinMarker);
     expect(lingyinResult).toHaveAttribute("data-active", "true");
     expect(lingyinMarker).toHaveAttribute("data-active", "true");
+  });
+
+  it("uses a departure point without limiting later map searches to that city", async () => {
+    const poiUrls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/maps/poi")) {
+          poiUrls.push(url);
+          return new Response(
+            JSON.stringify({
+              items: [
+                {
+                  id: "poi-bund",
+                  name: "外滩",
+                  address: "中山东一路",
+                  city: "上海",
+                  district: "黄浦区",
+                  type: "风景名胜",
+                  source: "amap",
+                  location: { lng: 121.49, lat: 31.24 }
+                }
+              ]
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(screen.getByLabelText("出发点")).toBeInTheDocument();
+    expect(screen.queryByLabelText("目的地")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
+    await user.clear(screen.getByLabelText("在地图上搜索地点"));
+    await user.type(screen.getByLabelText("在地图上搜索地点"), "外滩");
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
+
+    await screen.findByRole("button", { name: "添加外滩到 Day 1" });
+    const bundUrl = poiUrls.find((url) => url.includes("keywords=%E5%A4%96%E6%BB%A9"));
+    expect(bundUrl).toBeTruthy();
+    expect(new URL(bundUrl!, "http://localhost").searchParams.get("city")).toBe("全国");
+  });
+
+  it("shows the previous day's final activity as the next day's read-only continuation start", async () => {
+    let itinerary = createDraftItinerary({
+      title: "江南跨城两日",
+      destination: "上海虹桥站",
+      startDate: "2026-07-01",
+      endDate: "2026-07-02"
+    });
+    const [day1, day2] = itinerary.days;
+    itinerary = addActivity(itinerary, day1!.id, {
+      type: "attraction",
+      title: "西湖",
+      placeName: "西湖",
+      place: {
+        name: "西湖",
+        city: "杭州",
+        coordinates: { lng: 120.141, lat: 30.259 }
+      },
+      startTime: "14:00",
+      endTime: "17:00"
+    });
+    itinerary = addActivity(itinerary, day1!.id, {
+      type: "food",
+      title: "湖滨咖啡",
+      placeName: "湖滨银泰",
+      place: {
+        name: "湖滨咖啡",
+        city: "杭州",
+        coordinates: { lng: 120.166, lat: 30.255 }
+      },
+      startTime: "11:30",
+      endTime: "12:30"
+    });
+    itinerary = addActivity(itinerary, day2!.id, {
+      type: "attraction",
+      title: "苏州博物馆",
+      placeName: "苏州博物馆",
+      place: {
+        name: "苏州博物馆",
+        city: "苏州",
+        coordinates: { lng: 120.629, lat: 31.318 }
+      },
+      startTime: "10:00",
+      endTime: "12:00"
+    });
+    const cafe = itinerary.days[0]!.activities.at(-1)!;
+    const museum = itinerary.days[1]!.activities[0]!;
+    itinerary = setTransportLeg(itinerary, day2!.id, {
+      fromActivityId: cafe.id,
+      toActivityId: museum.id,
+      mode: "driving",
+      distanceMeters: 164000,
+      durationMinutes: 118,
+      provider: "mock",
+      routeStatus: "estimated",
+      summary: "跨城到首站"
+    });
+    window.history.replaceState(null, "", "#/workbench");
+    window.localStorage.setItem("journey:last-itinerary-id", itinerary.id);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [itinerary] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills") || url.includes("/api/agent/sessions")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "江南跨城两日" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Day 2" }));
+
+    expect(screen.getByRole("listitem", { name: "湖滨咖啡" })).toBeInTheDocument();
+    expect(screen.getByText("湖滨银泰")).toBeInTheDocument();
+    expect(screen.queryByText("接续起点")).not.toBeInTheDocument();
+    expect(screen.queryByText(/跟随 Day 1 收尾/)).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "路线：湖滨咖啡 到 苏州博物馆" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "编辑湖滨咖啡" }));
+    expect(screen.getByRole("heading", { name: "Day 1" })).toBeInTheDocument();
+    expect(screen.getByLabelText("第 2 项活动名称")).toHaveValue("湖滨咖啡");
+  });
+
+  it("shows the continuation start even before the next day has activities", async () => {
+    let itinerary = createDraftItinerary({
+      title: "杭州三日松弛游",
+      destination: "杭州",
+      startDate: "2026-07-01",
+      endDate: "2026-07-03"
+    });
+    const [day1, day2] = itinerary.days;
+    itinerary = addActivity(itinerary, day1!.id, {
+      type: "attraction",
+      title: "西湖晨间散步",
+      placeName: "西湖",
+      place: {
+        name: "西湖",
+        city: "杭州",
+        coordinates: { lng: 120.141, lat: 30.259 }
+      },
+      startTime: "09:00",
+      endTime: "11:00"
+    });
+    itinerary = addActivity(itinerary, day1!.id, {
+      type: "food",
+      title: "湖滨咖啡",
+      placeName: "湖滨银泰",
+      place: {
+        name: "湖滨咖啡",
+        city: "杭州",
+        coordinates: { lng: 120.166, lat: 30.255 }
+      },
+      startTime: "11:30",
+      endTime: "12:30"
+    });
+    window.history.replaceState(null, "", "#/workbench");
+    window.localStorage.setItem("journey:last-itinerary-id", itinerary.id);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [itinerary] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills") || url.includes("/api/agent/sessions")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "杭州三日松弛游" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Day 2" }));
+
+    expect(screen.getByRole("listitem", { name: "湖滨咖啡" })).toBeInTheDocument();
+    expect(screen.getByText("湖滨银泰")).toBeInTheDocument();
+    expect(screen.queryByText("接续起点")).not.toBeInTheDocument();
+    expect(screen.queryByText(/跟随 Day 1 收尾/)).not.toBeInTheDocument();
+    expect(screen.getByText("这一天还没有安排")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "编辑湖滨咖啡" }));
+    expect(screen.getByRole("heading", { name: "Day 1" })).toBeInTheDocument();
+    expect(screen.getByLabelText("第 2 项活动名称")).toHaveValue("湖滨咖啡");
   });
 
   it("carries rich POI details from search into the editable activity", async () => {
@@ -847,17 +1162,18 @@ describe("Travel Skill Agent frontend", () => {
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.click(await screen.findByRole("button", { name: "添加灵隐寺到 Day 2" }));
-    expect(screen.getByText("Day 2 · 1 个地点")).toBeInTheDocument();
+    expect(screen.getByText("Day 2 · 1 个地点 · 1 段交通 · 1.3 km · 18 分钟")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "全部行程" }));
 
     await waitFor(() => {
-      expect(screen.getByText("全部行程 · 3 个地点 · 1 段交通 · 1.3 km · 18 分钟")).toBeInTheDocument();
+      expect(screen.getByText("全部行程 · 3 个地点 · 2 段交通 · 2.6 km · 36 分钟")).toBeInTheDocument();
     });
     expect(screen.getByTestId("map-day-route-day-1")).toHaveTextContent("Day 1 路线");
     expect(screen.getByTestId("map-day-route-day-1")).toHaveTextContent("2 个地点");
     expect(screen.getByTestId("map-day-route-day-2")).toHaveTextContent("Day 2 路线");
     expect(screen.getByTestId("map-day-route-day-2")).toHaveTextContent("1 个地点");
+    expect(screen.getByTestId("map-day-route-day-2")).toHaveTextContent("1 段交通 · 1.3 km · 18 分钟");
   });
 
   it("groups the full-trip map overview by day for longer itineraries", async () => {
@@ -1409,6 +1725,47 @@ describe("Travel Skill Agent frontend", () => {
     expect(anchorClick).toHaveBeenCalledTimes(2);
   });
 
+  it("opens a dedicated read-only travel result page when exporting the itinerary", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/export")) {
+          return new Response("# 杭州三日松弛游\n\n## 行程总览\n\n总安排：2 项\n");
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    vi.stubGlobal(
+      "URL",
+      Object.assign(URL, {
+        createObjectURL: vi.fn(() => "blob:journey-export"),
+        revokeObjectURL: vi.fn()
+      })
+    );
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.click(screen.getByRole("button", { name: "导出" }));
+
+    expect(await screen.findByRole("heading", { name: "旅行结果" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/result");
+    const resultPage = screen.getByRole("region", { name: "只读行程结果" });
+    expect(within(resultPage).getByRole("heading", { name: "杭州三日松弛游" })).toBeInTheDocument();
+    expect(within(resultPage).getByText("Day 1")).toBeInTheDocument();
+    expect(within(resultPage).getByText("西湖晨间散步")).toBeInTheDocument();
+    expect(within(resultPage).getByText("湖滨咖啡")).toBeInTheDocument();
+    expect(within(resultPage).getByText("西湖晨间散步 到 湖滨咖啡")).toBeInTheDocument();
+    expect(within(resultPage).getByText("1.3 km / 18 分钟")).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "导出预览" })).toHaveTextContent("行程总览");
+    expect(screen.queryByRole("button", { name: "添加活动" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑西湖晨间散步" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "旅行助手" })).not.toBeInTheDocument();
+  });
+
   it("shows unresolved planning gaps in the export preview", async () => {
     const user = userEvent.setup();
     let itinerary = createDraftItinerary({
@@ -1491,13 +1848,12 @@ describe("Travel Skill Agent frontend", () => {
     expect(within(exportCheck).getByText("交通")).toBeInTheDocument();
     expect(within(exportCheck).getAllByText("Day 1 第 1 项 待补全安排")).toHaveLength(2);
     expect(within(exportCheck).getByText("Day 2 苏州博物馆 到 平江路午餐")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "旅行结果" })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/result");
+    expect(within(exportCheck).queryByRole("button", { name: /定位待补地点/ })).not.toBeInTheDocument();
 
-    await user.click(within(exportCheck).getByRole("button", { name: "定位待补地点：Day 1 第 1 项 待补全安排" }));
-    expect(screen.getByRole("region", { name: "编辑活动" })).toHaveTextContent("第 1 站 · 待补全安排");
-
-    await user.click(within(exportCheck).getByRole("button", { name: "定位待计算交通：Day 2 苏州博物馆 到 平江路午餐" }));
-    expect(screen.getByRole("region", { name: "编辑活动" })).toHaveTextContent("第 1 站 · 苏州博物馆");
-    expect(screen.getByRole("heading", { name: "Day 2" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回编辑" }));
+    expect(screen.getByRole("heading", { name: "Day 1" })).toBeInTheDocument();
   });
 
   it("imports a skill and runs the agent to update the itinerary canvas", async () => {
@@ -1869,9 +2225,12 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByRole("button", { name: /导入慢节奏街区漫步/ })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "导出" }));
-    expect(await screen.findByText("导出预览")).toBeInTheDocument();
-    expect(screen.getByText("完整行程 Markdown，可用于分享或归档。")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "旅行结果" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "导出预览" })).toHaveTextContent("可分享行程");
+    expect(screen.queryByText("完整行程 Markdown，可用于分享或归档。")).not.toBeInTheDocument();
     expect(screen.queryByText(/答辩或分享/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回编辑" }));
+    expect(screen.getByRole("heading", { name: "旅行助手" })).toBeInTheDocument();
 
     await user.clear(screen.getByLabelText("对行程的修改需求"));
     await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，别太赶。");
@@ -1988,31 +2347,143 @@ describe("Travel Skill Agent frontend", () => {
     });
   });
 
-  it("keeps the assistant as a wide-desktop rail and preserves the canvas below 1536px", async () => {
+  it("keeps compact workbench controls sized to their content", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const contextBar = screen.getByRole("navigation", { name: "行程日期和当前编辑上下文" });
+    const dayActionRow = contextBar.firstElementChild;
+    expect(dayActionRow).toHaveClass("w-full");
+    expect(dayActionRow).toHaveClass("max-w-full");
+    expect(dayActionRow).toHaveClass("flex-wrap");
+    expect(dayActionRow).toHaveClass("justify-between");
+    expect(dayActionRow).not.toHaveClass("grid");
+
+    const dayPicker = within(contextBar).getByRole("button", { name: "Day 1" }).parentElement;
+    const dayPickerWrapper = dayPicker?.parentElement;
+    expect(dayPickerWrapper).toHaveClass("w-fit");
+    expect(dayPickerWrapper).toHaveClass("max-w-full");
+    expect(dayPicker).toHaveClass("w-fit");
+    expect(dayPicker).toHaveClass("max-w-full");
+    expect(dayPicker).toHaveClass("h-10");
+
+    const addButton = within(contextBar).getByRole("button", { name: "添加活动" });
+    const dayActions = addButton.parentElement;
+    expect(dayActions).toHaveClass("ml-auto");
+    expect(dayActions).toHaveClass("justify-end");
+    expect(within(contextBar).getByRole("button", { name: "前加一天" })).toHaveClass("h-10");
+    expect(within(contextBar).getByRole("button", { name: "后加一天" })).toHaveClass("h-10");
+    expect(addButton).toHaveClass("h-10");
+
+    const daySummaryRow = dayActionRow?.nextElementSibling;
+    expect(daySummaryRow).toHaveClass("min-h-11");
+    expect(daySummaryRow).toHaveClass("items-center");
+
+    const dragHandle = screen.getByRole("button", { name: "拖动西湖晨间散步调整顺序" });
+    expect(dragHandle).toHaveClass("border-0");
+    expect(dragHandle).toHaveClass("bg-transparent");
+    expect(dragHandle.className).not.toContain("bg-[#f6f6f3]");
+
+    const activityHeading = screen.getByRole("heading", { name: "西湖晨间散步" });
+    expect(activityHeading.parentElement?.parentElement).toHaveClass("self-center");
+    expect(activityHeading.parentElement).toHaveClass("items-center");
+    expect(activityHeading.parentElement).toHaveClass("grid");
+    expect(activityHeading.parentElement?.parentElement?.parentElement).toHaveClass("grid-cols-[44px_minmax(0,1fr)_auto]");
+    expect(activityHeading.parentElement?.parentElement?.parentElement).toHaveClass("min-[1180px]:grid-cols-[44px_minmax(190px,0.86fr)_minmax(180px,1fr)_minmax(132px,auto)_auto]");
+    const activityMetaRow = activityHeading.nextElementSibling;
+    expect(activityMetaRow).toHaveClass("flex-wrap");
+    expect(activityMetaRow).toHaveTextContent("景点");
+
+    expect(screen.getByRole("button", { name: "当前日期" }).parentElement).toHaveClass("h-10");
+    expect(screen.getByRole("button", { name: "当前日期" })).toHaveClass("h-10");
+    expect(screen.getByRole("button", { name: "全部行程" })).toHaveClass("h-10");
+    expect(screen.getByRole("button", { name: "搜索地点" })).toHaveClass("h-10");
+  });
+
+  it("keeps route cards visually separated from the timeline background", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const routeCard = screen.getByRole("group", { name: "路线：西湖晨间散步 到 湖滨咖啡" });
+    expect(routeCard).toHaveClass("border");
+    expect(routeCard).toHaveClass("border-[#e5e5e0]");
+    expect(routeCard).toHaveClass("bg-[#f6f6f3]");
+    expect(routeCard.className).not.toContain("shadow");
+    expect(within(routeCard).getByRole("button", { name: "在地图中查看路线：西湖晨间散步 到 湖滨咖啡" })).toHaveClass("size-8");
+    expect(within(routeCard).getByRole("button", { name: "编辑路线细节：西湖晨间散步 到 湖滨咖啡" })).toHaveClass("size-8");
+  });
+
+  it("uses Pinterest warm surfaces and restrained red accents in the workbench", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const workbenchScroll = screen.getByTestId("workbench-scroll");
+    expect(workbenchScroll).toHaveClass("bg-[#fbfbf9]");
+
+    const mapPanel = screen.getByTestId("map-panel");
+    expect(mapPanel).toHaveClass("border-[#dadad3]");
+    expect(mapPanel).toHaveClass("bg-white");
+    expect(mapPanel.className).not.toContain("shadow");
+
+    const contextBar = screen.getByRole("navigation", { name: "行程日期和当前编辑上下文" });
+    expect(contextBar).toHaveClass("border-[#dadad3]");
+    expect(contextBar).toHaveClass("bg-white");
+    expect(within(contextBar).getByRole("button", { name: "Day 1" })).toHaveClass("bg-primary");
+    expect(within(contextBar).getByRole("button", { name: "添加活动" })).toHaveClass("bg-primary");
+
+    const activityCard = screen.getByTestId("activity-drop-0");
+    expect(activityCard).toHaveClass("border-[#dadad3]");
+    expect(activityCard).toHaveClass("bg-white");
+
+    const routeCard = screen.getByRole("group", { name: "路线：西湖晨间散步 到 湖滨咖啡" });
+    expect(routeCard).toHaveClass("border-[#e5e5e0]");
+    expect(routeCard).toHaveClass("bg-[#f6f6f3]");
+    expect(routeCard.className).not.toContain("shadow");
+  });
+
+  it("keeps the assistant as a rail whenever the viewport is wider than 768px", async () => {
     const user = userEvent.setup();
     const { getByTestId } = render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
-    expect(getByTestId("app-shell")).toHaveClass("2xl:grid-cols-[280px_minmax(0,1fr)_380px]");
+    expect(getByTestId("app-shell")).toHaveClass(
+      "min-[769px]:grid-cols-[minmax(0,1fr)_clamp(440px,46vw,500px)]"
+    );
+    expect(getByTestId("app-shell")).toHaveClass(
+      "lg:grid-cols-[72px_minmax(0,1fr)_clamp(440px,38vw,540px)]"
+    );
+    expect(getByTestId("app-shell")).toHaveClass(
+      "2xl:grid-cols-[280px_minmax(0,1fr)_clamp(520px,30vw,620px)]"
+    );
     expect(getByTestId("app-shell")).toHaveClass("h-dvh");
     expect(getByTestId("app-shell")).toHaveClass("overflow-hidden");
     expect(getByTestId("workbench-main")).toHaveClass("overflow-hidden");
     expect(getByTestId("workbench-scroll")).toHaveClass("overflow-auto");
     expect(getByTestId("app-shell").className).not.toContain("min-[1360px]:grid-cols");
     expect(getByTestId("app-shell").className).not.toContain("xl:grid-cols-[248px_minmax(0,1fr)_340px]");
-    expect(screen.getByRole("button", { name: "打开旅行助手" })).toHaveClass("2xl:hidden");
+    expect(getByTestId("app-shell").className).not.toContain("_320px");
+    expect(getByTestId("app-shell").className).not.toContain("_380px");
+    expect(screen.getByRole("button", { name: "打开旅行助手" })).toHaveClass("min-[769px]:hidden");
 
     const panelShell = getByTestId("agent-panel-shell");
     expect(panelShell).toHaveClass("hidden");
     expect(panelShell).toHaveClass("z-[1000]");
     expect(panelShell).toHaveClass("w-full");
-    expect(panelShell).toHaveClass("sm:w-[min(420px,calc(100vw-24px))]");
-    expect(panelShell).toHaveClass("2xl:block");
-    expect(panelShell).toHaveClass("2xl:static");
+    expect(panelShell).toHaveClass("sm:w-[min(440px,calc(100vw-24px))]");
+    expect(panelShell).toHaveClass("min-[769px]:block");
+    expect(panelShell).toHaveClass("min-[769px]:static");
+    expect(panelShell).toHaveClass("min-[769px]:w-auto");
+    expect(screen.getByRole("button", { name: "关闭旅行助手" })).toHaveClass("min-[769px]:hidden");
 
     await user.click(screen.getByRole("button", { name: "打开旅行助手" }));
-    expect(getByTestId("agent-backdrop")).toHaveClass("2xl:hidden");
+    expect(getByTestId("agent-backdrop")).toHaveClass("min-[769px]:hidden");
     expect(getByTestId("agent-backdrop")).toHaveClass("z-[900]");
   });
 
@@ -2089,7 +2560,11 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
     const contextBar = screen.getByRole("navigation", { name: "行程日期和当前编辑上下文" });
-    expect(contextBar).toHaveClass("sticky");
+    expect(contextBar).not.toHaveClass("sticky");
+    expect(contextBar).not.toHaveClass("-top-4");
+    expect(contextBar).not.toHaveClass("md:-top-5");
+    expect(contextBar).not.toHaveClass("z-30");
+    expect(contextBar).not.toHaveClass("backdrop-blur");
     expect(contextBar).toHaveTextContent("Day 1");
     expect(contextBar).toHaveTextContent("2026-07-01");
     expect(contextBar).toHaveTextContent("2 项安排");
@@ -2297,121 +2772,133 @@ describe("Travel Skill Agent frontend", () => {
     expect(submit).toBeDisabled();
   });
 
-  it("extracts a skill into an editable draft before publishing it", async () => {
+  it("starts the Skill creator agent and shows only the current question during interview", async () => {
+    let startBody: unknown;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/skills/creator/start")) {
+          startBody = JSON.parse(String(init?.body ?? "{}"));
+          const turn = creatorTurn();
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: turn }), turn }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "创作 Skill" }));
     await user.click(screen.getByRole("button", { name: "使用当前行程" }));
+    expect((screen.getByLabelText("来源材料") as HTMLTextAreaElement).value).toContain("西湖晨间散步");
 
-    expect((screen.getByLabelText("旅行风格来源文本") as HTMLTextAreaElement).value).toContain("西湖晨间散步");
-
-    await user.click(screen.getByRole("button", { name: "提取为旅行风格草稿" }));
-
-    expect(screen.getAllByText("确认规则").length).toBeGreaterThan(0);
-    expect(screen.getByText("发布")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Skill 正文")).not.toBeInTheDocument();
-    expect(screen.queryByText("发布检查")).not.toBeInTheDocument();
-    expect(screen.queryByText(/---\s*name:/)).not.toBeInTheDocument();
-    const nameInput = screen.getByLabelText("Skill 名称");
-    expect(nameInput).toHaveValue("杭州 · 杭州三日松弛游风格草稿");
-    await user.clear(nameInput);
-    await user.type(nameInput, "厦门海边松弛风格");
-    await user.click(screen.getByRole("button", { name: "发布到广场" }));
-
-    expect(screen.getByRole("heading", { name: "Skill 广场" })).toBeInTheDocument();
-    expect(screen.getByText("厦门海边松弛风格")).toBeInTheDocument();
-    expect(screen.queryByText(/从《杭州三日松弛游》提取的旅行风格草稿/)).not.toBeInTheDocument();
-    expect(screen.getByText(/慢节奏、咖啡、citywalk取向/)).toBeInTheDocument();
-
-    const initialVersionHistory = screen.getByLabelText("厦门海边松弛风格 版本记录");
-    expect(within(initialVersionHistory).getByText("v1")).toBeInTheDocument();
-    expect(within(initialVersionHistory).getByText("发布到广场")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "打开厦门海边松弛风格标签编辑" }));
-    const tagInput = screen.getByLabelText("编辑厦门海边松弛风格标签");
-    await user.clear(tagInput);
-    await user.type(tagInput, "海边,松弛,日落");
-    await user.click(screen.getByRole("button", { name: "保存厦门海边松弛风格标签" }));
-
-    const revisedVersionHistory = screen.getByLabelText("厦门海边松弛风格 版本记录");
-    expect(within(revisedVersionHistory).getByText("v2")).toBeInTheDocument();
-    expect(within(revisedVersionHistory).getByText("更新标签")).toBeInTheDocument();
-  });
-
-  it("turns the current assistant conversation into an editable travel style draft", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.type(screen.getByLabelText("对行程的修改需求"), "这次行程喜欢清晨散步和咖啡，不要赶路。");
-    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(screen.getByRole("button", { name: "开始创作" }));
 
     await waitFor(() => {
-      expect(screen.getAllByText(/已更新行程/).length).toBeGreaterThan(0);
+      expect(startBody).toMatchObject({
+        itineraryId: expect.any(String),
+        sourceText: expect.stringContaining("西湖晨间散步")
+      });
     });
-    await user.click(screen.getByRole("button", { name: "沉淀风格" }));
-
-    expect(screen.getByRole("heading", { name: "创作 Skill" })).toBeInTheDocument();
-    const source = screen.getByLabelText("旅行风格来源文本") as HTMLTextAreaElement;
-    expect(source.value).toContain("当前行程：杭州三日松弛游");
-    expect(source.value).toContain("用户需求：这次行程喜欢清晨散步和咖啡，不要赶路。");
-    expect(source.value).toContain("助手回复：已更新行程。");
-    expect(source.value).not.toMatch(/Agent 协作|主 Agent|trace/i);
-
-    await user.click(screen.getByRole("button", { name: "提取为旅行风格草稿" }));
-
-    expect(await screen.findByLabelText("Skill 名称")).toHaveValue("杭州 · 杭州三日松弛游风格草稿");
-    expect(screen.queryByText("发布检查")).not.toBeInTheDocument();
+    expect(screen.getByText("创作助手")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "这套旅行风格最适合在哪类请求里触发？" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "第一次到海边城市" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "想慢慢逛小店" })).toBeInTheDocument();
+    expect(screen.getByLabelText("补充答案")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交回答" })).toBeDisabled();
+    expect(screen.queryByText("问题 1")).not.toBeInTheDocument();
+    expect(screen.queryByText("第 1 题")).not.toBeInTheDocument();
+    expect(screen.queryByText("1/3")).not.toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "创作对话" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "最终 Skill 产物" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/frontmatter/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SKILL\.md/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Skill 名称")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Skill 正文")).not.toBeInTheDocument();
   });
 
-  it("requires a planning rule before publishing a created travel style", async () => {
-    const user = userEvent.setup();
-    render(<App />);
-
-    await user.click(screen.getByRole("button", { name: "创作 Skill" }));
-    await user.click(screen.getByRole("button", { name: "提取为旅行风格草稿" }));
-
-    const rules = screen.getByLabelText("规划规则");
-    await user.clear(rules);
-
-    expect(screen.getByText("发布检查")).toBeInTheDocument();
-    expect(screen.getByText("至少添加一条规划规则")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发布到广场" })).toBeDisabled();
-
-    await user.type(rules, "每天最多安排两个核心景点");
-    expect(screen.getByRole("button", { name: "发布到广场" })).not.toBeDisabled();
-  });
-
-  it("extracts pasted travel text without mixing in the current itinerary", async () => {
-    let extractBody: unknown;
+  it("submits multi-option Skill creator answers with custom input to the session reply endpoint", async () => {
+    const replyBodies: unknown[] = [];
+    const multiTurn = creatorTurn({
+      question: "哪些做法要稳定保留？",
+      mode: "multiple",
+      progressPercent: 50,
+      options: [
+        { id: "small-shops", label: "保留傍晚小店" },
+        { id: "sea-walks", label: "安排海边散步" },
+        { id: "low-density", label: "每天少排一点" }
+      ]
+    });
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.includes("/api/skills/extract")) {
-          extractBody = JSON.parse(String(init?.body ?? "{}"));
+        if (url.includes("/api/skills/creator/start")) {
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: multiTurn }), turn: multiTurn }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills/creator/creator-session-1/reply")) {
+          replyBodies.push(JSON.parse(String(init?.body ?? "{}")));
+          const nextTurn = creatorTurn({ question: "哪些安排应该避免？", progressPercent: 75 });
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: nextTurn }), turn: nextTurn }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "创作 Skill" }));
+    await user.type(screen.getByLabelText("来源材料"), "海边散步、傍晚小店、不要赶路。");
+    await user.click(screen.getByRole("button", { name: "开始创作" }));
+    await user.click(await screen.findByRole("button", { name: "保留傍晚小店" }));
+    await user.click(screen.getByRole("button", { name: "安排海边散步" }));
+    await user.type(screen.getByLabelText("补充答案"), "每天最多两个核心安排");
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
+
+    await waitFor(() => {
+      expect(replyBodies).toHaveLength(1);
+    });
+    expect(replyBodies[0]).toEqual({
+      selectedOptionIds: ["small-shops", "sea-walks"],
+      customAnswer: "每天最多两个核心安排"
+    });
+    expect(screen.getByRole("heading", { name: "哪些安排应该避免？" })).toBeInTheDocument();
+  });
+
+  it("keeps final Skill markdown hidden until the final review is expanded", async () => {
+    const doneTurn = creatorTurn({
+      question: undefined,
+      mode: undefined,
+      options: undefined,
+      progressPercent: 100,
+      done: true
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/skills/creator/start")) {
+          const turn = creatorTurn();
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: turn }), turn }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills/creator/creator-session-1/reply")) {
           return new Response(
-            JSON.stringify({
-              skill: {
-                id: "skill-external-text",
-                name: "external-text-style",
-                displayName: "外部游记风格",
-                description: "从外部游记提取的旅行风格",
-                body: "偏好海边散步和傍晚小店。",
-                tags: ["海边", "松弛"],
-                rules: ["减少跨区切换"],
-                forbidden: ["未经用户确认直接发布"],
-                status: "draft",
-                source: "extracted",
-                imports: 0,
-                favorites: 0,
-                favorited: false,
-                createdAt: "2026-06-14T00:00:00.000Z",
-                updatedAt: "2026-06-14T00:00:00.000Z"
-              }
-            }),
-            { status: 201, headers: { "Content-Type": "application/json" } }
+            JSON.stringify({ session: creatorSession({ currentTurn: doneTurn, status: "ready" }), turn: doneTurn }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
           );
         }
         return new Response("", { status: 404 });
@@ -2421,18 +2908,90 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "创作 Skill" }));
-    const source = screen.getByLabelText("旅行风格来源文本");
-    await user.clear(source);
-    await user.type(source, "这次旅行只想保留海边散步、傍晚小店和松弛节奏。");
-    await user.click(screen.getByRole("button", { name: "提取为旅行风格草稿" }));
+    await user.type(screen.getByLabelText("来源材料"), "海边散步、傍晚小店、不要赶路。");
+    await user.click(screen.getByRole("button", { name: "开始创作" }));
+    await user.click(await screen.findByRole("button", { name: "第一次到海边城市" }));
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
+
+    expect(await screen.findByText("海边小店松弛风格")).toBeInTheDocument();
+    expect(screen.getByText("适合看海、逛小店、保留傍晚松弛时间的旅行风格。")).toBeInTheDocument();
+    expect(screen.getByText("每天最多两个核心安排")).toBeInTheDocument();
+    expect(screen.getByText("避免连续跨区")).toBeInTheDocument();
+    expect(screen.queryByText(/name: seaside-shop-style/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/frontmatter/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SKILL\.md/)).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "展开最终 Skill 产物" }));
+
+    expect(screen.getByText(/name: seaside-shop-style/)).toBeInTheDocument();
+    expect(screen.getByText(/SKILL\.md/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "发布到广场" })).not.toBeDisabled();
+  });
+
+  it("shows retryable Skill creator reply failures and preserves the pending answer", async () => {
+    const replyBodies: unknown[] = [];
+    let replyAttempts = 0;
+    const multiTurn = creatorTurn({
+      question: "哪些做法要稳定保留？",
+      mode: "multiple",
+      progressPercent: 50,
+      options: [
+        { id: "small-shops", label: "保留傍晚小店" },
+        { id: "sea-walks", label: "安排海边散步" },
+        { id: "low-density", label: "每天少排一点" }
+      ]
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/skills/creator/start")) {
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: multiTurn }), turn: multiTurn }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills/creator/creator-session-1/reply")) {
+          replyAttempts += 1;
+          replyBodies.push(JSON.parse(String(init?.body ?? "{}")));
+          if (replyAttempts === 1) {
+            return new Response(JSON.stringify({ error: "model unavailable" }), {
+              status: 502,
+              headers: { "Content-Type": "application/json" }
+            });
+          }
+          const nextTurn = creatorTurn({ question: "哪些安排应该避免？", progressPercent: 75 });
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: nextTurn }), turn: nextTurn }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "创作 Skill" }));
+    await user.type(screen.getByLabelText("来源材料"), "海边散步、傍晚小店、不要赶路。");
+    await user.click(screen.getByRole("button", { name: "开始创作" }));
+    await user.click(await screen.findByRole("button", { name: "保留傍晚小店" }));
+    await user.type(screen.getByLabelText("补充答案"), "需要保留日落后的自由时间");
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
+
+    expect(await screen.findByText("创作助手没有返回可用问题，请重试本题。")).toBeInTheDocument();
+    expect(screen.getByLabelText("补充答案")).toHaveValue("需要保留日落后的自由时间");
+
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
 
     await waitFor(() => {
-      expect(extractBody).toMatchObject({
-        sourceText: "这次旅行只想保留海边散步、傍晚小店和松弛节奏。"
-      });
+      expect(replyBodies).toHaveLength(2);
     });
-    expect(extractBody).not.toHaveProperty("itineraryId");
-    expect(await screen.findByDisplayValue("外部游记风格")).toBeInTheDocument();
+    expect(replyBodies[1]).toEqual({
+      selectedOptionIds: ["small-shops"],
+      customAnswer: "需要保留日落后的自由时间"
+    });
+    expect(screen.getByRole("heading", { name: "哪些安排应该避免？" })).toBeInTheDocument();
   });
 
   it("lets a user manage preferences and clear assistant memory outside the chat panel", async () => {
@@ -2509,7 +3068,17 @@ describe("Travel Skill Agent frontend", () => {
     await user.type(screen.getByLabelText("对行程的修改需求"), requestText);
     await user.click(screen.getByRole("button", { name: "发送" }));
 
-    expect(screen.getByText("正在处理行程")).toBeInTheDocument();
+    expect(within(screen.getByTestId("agent-message-scroll")).getByText(requestText)).toBeInTheDocument();
+    expect(screen.getByLabelText("对行程的修改需求")).toHaveValue("");
+    const activityLog = screen.getByRole("group", { name: "Agent 执行记录" });
+    expect(activityLog).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Agent 执行记录/ })).toHaveAttribute("aria-expanded", "true");
+    const thinkingPlaceholder = within(activityLog).getByTestId("agent-thinking-placeholder");
+    expect(within(thinkingPlaceholder).getByText("思考中")).toBeInTheDocument();
+    expect(within(thinkingPlaceholder).getByTestId("agent-thinking-spinner")).toBeInTheDocument();
+    expect(screen.queryByText("公开思考摘要")).not.toBeInTheDocument();
+    expect(screen.queryByText(`用户想要「${requestText}」，我需要先读取当前行程、风格和约束，再决定要调用哪些工具。`)).not.toBeInTheDocument();
+    expect(screen.queryByText("正在理解你的需求")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "停止" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "停止" }));
@@ -2521,6 +3090,462 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByText("慢节奏街区探索")).not.toBeInTheDocument();
   });
 
+  it("shows a thinking spinner until real model output or tool calls arrive", async () => {
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller;
+              }
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const activityLog = await screen.findByRole("group", { name: "Agent 执行记录" });
+    const thinkingPlaceholder = within(activityLog).getByTestId("agent-thinking-placeholder");
+    expect(within(thinkingPlaceholder).getByText("思考中")).toBeInTheDocument();
+    expect(within(thinkingPlaceholder).getByTestId("agent-thinking-spinner")).toBeInTheDocument();
+    expect(within(activityLog).queryByText("等待模型输出或工具调用。")).not.toBeInTheDocument();
+    expect(within(activityLog).queryByTestId("agent-support-status")).not.toBeInTheDocument();
+
+    streamController?.close();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    });
+  });
+
+  it("renders real streamed model reasoning separately from numbered action steps", async () => {
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller;
+                controller.enqueue(
+                  encoder.encode(
+                    `${sseChunk(
+                      "activity",
+                      testAgentRunEvent({
+                        sequence: 1,
+                        type: "thought_summary",
+                        title: "模型思考",
+                        detail: "我需要先判断 Day 2 下午是否有可调整空档。"
+                      })
+                    )}\n\n`
+                  )
+                );
+              }
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const activityLog = await screen.findByRole("group", { name: "Agent 执行记录" });
+    const reasoning = within(activityLog).getByTestId("agent-reasoning-block");
+    expect(within(reasoning).getByText("模型思考")).toBeInTheDocument();
+    expect(within(reasoning).getByText("我需要先判断 Day 2 下午是否有可调整空档。")).toBeInTheDocument();
+    expect(within(activityLog).queryByTestId("agent-primary-step-list")).not.toBeInTheDocument();
+    expect(within(activityLog).queryByTestId("agent-support-status")).not.toBeInTheDocument();
+
+    streamController?.close();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    });
+  });
+
+  it("renders streamed agent output and tool calls as a running timeline", async () => {
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    const longAgentOutput = [
+      "让我检查当前行程空档。",
+      "这段模型输出可能会比较长，需要限制在步骤内部滚动，而不是把整个助手输入区挤下去。",
+      "我会继续保留工具调用记录。"
+    ].join("");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                streamController = controller;
+                controller.enqueue(
+                  encoder.encode(
+                    `${sseChunk(
+                      "activity",
+                      testAgentRunEvent({
+                        sequence: 1,
+                        type: "assistant_message",
+                        title: "行动输出",
+                        detail: longAgentOutput
+                      })
+                    )}\n\n`
+                  )
+                );
+                controller.enqueue(
+                  encoder.encode(
+                    `${sseChunk(
+                      "activity",
+                      testAgentRunEvent({
+                        sequence: 2,
+                        type: "tool_call",
+                        status: "running",
+                        agent: "AttractionAgent",
+                        title: "搜索地点",
+                        detail: "室内景点",
+                        technical: { input: { query: "室内景点" } }
+                      })
+                    )}\n\n`
+                  )
+                );
+                controller.enqueue(
+                  encoder.encode(
+                    `${sseChunk(
+                      "activity",
+                      testAgentRunEvent({
+                        sequence: 3,
+                        type: "tool_result",
+                        agent: "AttractionAgent",
+                        title: "搜索地点完成",
+                        detail: "找到 3 个候选地点",
+                        technical: { output: { count: 3 } }
+                      })
+                    )}\n\n`
+                  )
+                );
+              }
+            }),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("回复")).toBeInTheDocument();
+    const activityLog = screen.getByRole("group", { name: "Agent 执行记录" });
+    const primarySteps = within(activityLog).getByTestId("agent-primary-step-list");
+    expect(within(primarySteps).queryByText("已分析用户请求")).not.toBeInTheDocument();
+    expect(within(activityLog).queryByTestId("agent-support-status")).not.toBeInTheDocument();
+    expect(within(primarySteps).getByText("回复")).toBeInTheDocument();
+    expect(within(primarySteps).queryByText("对外输出")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("主 Agent")).not.toBeInTheDocument();
+    expect(within(primarySteps).getAllByText("搜索地点").length).toBeGreaterThan(0);
+    expect(within(primarySteps).getAllByText("地点 Agent").length).toBeGreaterThan(0);
+    expect(within(primarySteps).getByText("室内景点")).toBeInTheDocument();
+    expect(within(primarySteps).getByText("工具结果")).toBeInTheDocument();
+    const outputDetail = within(primarySteps).getByText((content) => content.includes("这段模型输出可能会比较长"));
+    expect(outputDetail).toHaveClass("max-h-40");
+    expect(outputDetail).toHaveClass("overflow-y-auto");
+    expect(within(activityLog).getAllByText("技术详情").length).toBeGreaterThan(0);
+    expect(within(activityLog).queryByText("AGENT_MAX_TURNS")).not.toBeInTheDocument();
+    expect(screen.queryByText("正在连接助手，等待实时进度")).not.toBeInTheDocument();
+
+    streamController?.close();
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+    });
+  });
+
+  it("collapses completed agent activity while keeping the final reply and diff visible", async () => {
+    const seed = createSeedItinerary();
+    const updated = addActivity(seed, seed.days[1]!.id, {
+      type: "attraction",
+      title: "浙江省博物馆",
+      placeName: "浙江省博物馆",
+      startTime: "14:00",
+      endTime: "16:00"
+    });
+    const runEvents = [
+      testAgentRunEvent({
+        sequence: 1,
+        type: "assistant_message",
+        title: "行动输出",
+        detail: "让我搜索适合 Day 2 下午的室内景点。"
+      }),
+      testAgentRunEvent({
+        sequence: 2,
+        type: "tool_call",
+        status: "running",
+        agent: "AttractionAgent",
+        title: "搜索地点",
+        detail: "浙江省博物馆",
+        technical: { input: { query: "浙江省博物馆" } }
+      }),
+      testAgentRunEvent({
+        sequence: 3,
+        type: "tool_result",
+        agent: "AttractionAgent",
+        title: "搜索地点完成",
+        detail: "已找到浙江省博物馆",
+        technical: { output: { name: "浙江省博物馆" } }
+      }),
+      testAgentRunEvent({
+        sequence: 4,
+        type: "state_patch",
+        agent: "PlannerAgent",
+        title: "写入行程",
+        detail: "Day 2 下午新增浙江省博物馆"
+      }),
+      testAgentRunEvent({
+        sequence: 5,
+        type: "final_signal",
+        agent: "CriticAgent",
+        title: "完成本轮任务",
+        detail: "已添加地点：浙江省博物馆"
+      })
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              ...runEvents.map((event) => sseChunk("activity", event)),
+              `event: final\ndata: ${JSON.stringify({
+                itinerary: updated,
+                message: { role: "assistant", content: "我已经帮你把 Day 2 下午补成浙江省博物馆。" },
+                diff: ["已添加地点：浙江省博物馆"],
+                events: runEvents
+              })}`,
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "Day 2 下午补一个室内景点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("我已经帮你把 Day 2 下午补成浙江省博物馆。")).toBeInTheDocument();
+    const activityToggle = screen.getByRole("button", { name: /Agent 执行记录/ });
+    expect(activityToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("已完成模型与工具调用 · 3 步")).toBeInTheDocument();
+    expect(screen.queryByText("Day 2 下午新增浙江省博物馆")).not.toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "本轮改动" })).getByText("已添加地点：浙江省博物馆")).toBeInTheDocument();
+
+    await user.click(activityToggle);
+
+    const activityLog = screen.getByRole("group", { name: "Agent 执行记录" });
+    const primarySteps = within(activityLog).getByTestId("agent-primary-step-list");
+    expect(within(primarySteps).queryByText("Day 2 下午新增浙江省博物馆")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("写入画布")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("完成信号")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("已分析用户请求")).not.toBeInTheDocument();
+    expect(within(activityLog).queryByTestId("agent-support-status")).not.toBeInTheDocument();
+    expect(within(primarySteps).getByText("回复")).toBeInTheDocument();
+    expect(within(primarySteps).queryByText("行动输出")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("对外输出")).not.toBeInTheDocument();
+    expect(within(primarySteps).queryByText("主 Agent")).not.toBeInTheDocument();
+    expect(within(primarySteps).getByText("搜索地点")).toBeInTheDocument();
+    expect(within(primarySteps).getByText("搜索地点完成")).toBeInTheDocument();
+    expect(screen.queryByText("准备规划工具循环")).not.toBeInTheDocument();
+  });
+
+  it("keeps the completed agent log anchored when expanding it inside the message scroll area", async () => {
+    const seed = createSeedItinerary();
+    const runEvents = [
+      testAgentRunEvent({
+        sequence: 1,
+        type: "assistant_message",
+        title: "行动输出",
+        detail: "我整理了一版较长的行程说明。"
+      }),
+      testAgentRunEvent({
+        sequence: 2,
+        type: "tool_call",
+        status: "running",
+        agent: "AttractionAgent",
+        title: "检查地点",
+        detail: "西湖"
+      }),
+      testAgentRunEvent({
+        sequence: 3,
+        type: "tool_result",
+        agent: "AttractionAgent",
+        title: "检查地点完成",
+        detail: "地点已确认"
+      })
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              ...runEvents.map((event) => sseChunk("activity", event)),
+              `event: final\ndata: ${JSON.stringify({
+                itinerary: seed,
+                message: {
+                  role: "assistant",
+                  content: [
+                    "这是展开记录下方的长回复。",
+                    "",
+                    ...Array.from({ length: 12 }, (_, index) => `第 ${index + 1} 行说明，模拟较长内容。`)
+                  ].join("\n")
+                },
+                diff: [],
+                events: runEvents
+              })}`,
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "给我一段长说明。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const activityToggle = await screen.findByRole("button", { name: /Agent 执行记录/ });
+    const messageScroll = screen.getByTestId("agent-message-scroll");
+    Object.defineProperty(messageScroll, "scrollHeight", { configurable: true, value: 2000 });
+    messageScroll.scrollTop = 500;
+    const activityLog = screen.getByRole("group", { name: "Agent 执行记录" });
+    const rectMock = vi
+      .fn()
+      .mockReturnValueOnce({ top: 240, bottom: 290, left: 0, right: 300, width: 300, height: 50, x: 0, y: 240, toJSON: () => ({}) })
+      .mockReturnValueOnce({ top: 120, bottom: 390, left: 0, right: 300, width: 300, height: 270, x: 0, y: 120, toJSON: () => ({}) });
+    activityLog.getBoundingClientRect = rectMock;
+
+    await user.click(activityToggle);
+
+    await waitFor(() => {
+      expect(activityToggle).toHaveAttribute("aria-expanded", "true");
+    });
+    expect(messageScroll.scrollTop).toBe(380);
+    expect(rectMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps assistant history in a dedicated scrollable message area", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const messageScroll = screen.getByTestId("agent-message-scroll");
+    expect(messageScroll).toHaveClass("overflow-y-auto");
+    expect(messageScroll).toHaveClass("overscroll-contain");
+    expect(messageScroll).toHaveClass("min-h-0");
+    expect(screen.getByTestId("agent-message-stack")).toHaveClass("min-h-max");
+    expect(screen.getByTestId("agent-message-stack").className).not.toContain("justify-end");
+  });
+
+  it("keeps the current style selector on one compact row", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const styleStrip = screen.getByTestId("agent-style-strip");
+    expect(styleStrip).toHaveClass("flex");
+    expect(styleStrip).toHaveClass("items-center");
+    expect(styleStrip).toHaveClass("gap-2");
+    expect(styleStrip).toHaveClass("py-2");
+    expect(styleStrip.className).not.toContain("py-2.5");
+
+    const styleList = screen.getByTestId("agent-style-list");
+    expect(styleList).toHaveClass("flex-1");
+    expect(styleList).toHaveClass("overflow-x-auto");
+    expect(styleList).toHaveTextContent("未选择风格");
+  });
+
+  it("renders markdown tables in assistant replies as scrollable tables", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              `event: final\ndata: ${JSON.stringify({
+                itinerary: createSeedItinerary(),
+                message: {
+                  role: "assistant",
+                  content: [
+                    "我整理了一版时间表：",
+                    "",
+                    "| 时间 | 安排 | 备注 |",
+                    "| --- | --- | --- |",
+                    "| 09:00 | **西湖晨间散步** | 慢节奏 |",
+                    "| 11:30 | 湖滨咖啡 | 休息 |"
+                  ].join("\n")
+                },
+                diff: [],
+                events: []
+              })}`,
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "给我一个表格版安排。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    const table = await screen.findByTestId("markdown-table");
+    expect(within(table).getByRole("columnheader", { name: "时间" })).toBeInTheDocument();
+    expect(within(table).getByRole("columnheader", { name: "安排" })).toBeInTheDocument();
+    expect(within(table).getByRole("cell", { name: "西湖晨间散步" })).toBeInTheDocument();
+    expect(within(table).getByRole("cell", { name: "湖滨咖啡" })).toBeInTheDocument();
+    expect(screen.queryByText("| --- | --- | --- |")).not.toBeInTheDocument();
+  });
+
   it("shows streamed assistant errors without applying local fallback changes", async () => {
     let agentRunCalls = 0;
     vi.stubGlobal(
@@ -2530,7 +3555,15 @@ describe("Travel Skill Agent frontend", () => {
         if (url.includes("/api/agent/run-stream")) {
           return new Response(
             [
-              'event: progress\ndata: {"message":"正在检查地点和路线"}',
+              sseChunk(
+                "activity",
+                testAgentRunEvent({
+                  sequence: 1,
+                  type: "thought_summary",
+                  title: "分析用户请求",
+                  detail: "正在检查地点和路线"
+                })
+              ),
               'event: error\ndata: {"message":"路线服务暂时不可用，请稍后重试。"}',
               ""
             ].join("\n\n"),
@@ -2558,4 +3591,3 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
   });
 });
-
