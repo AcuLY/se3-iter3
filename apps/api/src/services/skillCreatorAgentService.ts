@@ -53,27 +53,35 @@ export class SkillCreatorAgentService {
     const sourceText = input.sourceText.trim();
     if (!sourceText) throw new Error("sourceText is required");
     const draft = this.skills.extract(sourceText, input.itinerary);
-    const session = createSkillCreatorSession({
-      id: createId("skill-creator-session"),
-      sourceText,
-      itineraryId: input.itinerary?.id,
-      draft
-    });
-    const turn = await this.nextTurn(session);
-    const nextDraft = this.db.saveSkill(applySkillCreatorDraftPatch(draft, turn.draftPatch));
-    const saved = this.db.saveSkillCreatorSession({
-      ...session,
-      draft: nextDraft,
-      currentTurn: turn,
-      status: turn.done ? "ready" : "active",
-      updatedAt: nowIso()
-    });
-    return { session: saved, turn };
+    try {
+      const session = createSkillCreatorSession({
+        id: createId("skill-creator-session"),
+        sourceText,
+        itineraryId: input.itinerary?.id,
+        draft
+      });
+      const turn = await this.nextTurn(session);
+      const nextDraft = this.db.saveSkill(applySkillCreatorDraftPatch(draft, turn.draftPatch));
+      const saved = this.db.saveSkillCreatorSession({
+        ...session,
+        draft: nextDraft,
+        currentTurn: turn,
+        status: turn.done ? "ready" : "active",
+        updatedAt: nowIso()
+      });
+      return { session: saved, turn };
+    } catch (error) {
+      this.db.deleteSkill(draft.id);
+      throw error;
+    }
   }
 
   async reply(input: SkillCreatorReplyInput): Promise<SkillCreatorReplyResult> {
     const session = this.db.getSkillCreatorSession(input.sessionId);
     if (!session) throw new Error(`Skill creator session not found: ${input.sessionId}`);
+    if (!session.currentTurn || session.currentTurn.done || session.status === "ready") {
+      throw new Error("Skill creator session is not accepting answers");
+    }
     const answer = SkillCreatorAnswerSchema.parse(input.answer);
     const answeredSession = recordSkillCreatorAnswer(session, answer);
     const turn = await this.nextTurn(answeredSession);
@@ -93,9 +101,12 @@ export class SkillCreatorAgentService {
     const messages = buildCreatorMessages(session);
     const raw = await this.llmClient(messages);
     const parsed = await parseCreatorTurnWithRepair(raw, messages, this.llmClient);
-    if (parsed.done && !isSkillCreatorDraftReady(applySkillCreatorDraftPatch(session.draft, parsed.draftPatch))) {
+    if (
+      parsed.done &&
+      (!isFinalTurnPatchReady(parsed) || !isSkillCreatorDraftReady(applySkillCreatorDraftPatch(session.draft, parsed.draftPatch)))
+    ) {
       return {
-        assistantMessage: "这版还差一个能稳定影响规划的规则，我需要再确认一次。",
+        assistantMessage: "这版还差完整的可发布字段，我需要再确认一次。",
         question: "生成行程时，哪些安排一出现就算跑偏？",
         mode: "multiple",
         options: [
@@ -126,6 +137,18 @@ function buildCreatorMessages(session: SkillCreatorSession): DeepSeekMessage[] {
       })
     }
   ];
+}
+
+function isFinalTurnPatchReady(turn: SkillCreatorTurn): boolean {
+  const patch = turn.draftPatch;
+  return Boolean(
+    patch.displayName?.trim() &&
+      patch.description?.trim() &&
+      patch.body?.trim() &&
+      patch.tags?.some((tag) => tag.trim()) &&
+      patch.rules?.some((rule) => rule.trim()) &&
+      patch.forbidden?.some((item) => item.trim())
+  );
 }
 
 function parseCreatorTurn(raw: string): SkillCreatorTurn {
