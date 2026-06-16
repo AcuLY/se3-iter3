@@ -12,6 +12,19 @@ export async function apiPost<T>(path: string, body: unknown, fallback: T): Prom
   return apiJson("POST", path, body, fallback);
 }
 
+export async function apiPostStrict<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(apiUrl(path), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(20_000)
+  });
+  if (!response.ok) {
+    throw new Error(`Request failed: ${response.status}`);
+  }
+  return (await response.json()) as T;
+}
+
 export async function apiPatch<T>(path: string, body: unknown, fallback: T): Promise<T> {
   return apiJson("PATCH", path, body, fallback);
 }
