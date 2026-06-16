@@ -15,8 +15,7 @@ import {
   type RouteSummary,
   type RouteStep,
   type TravelSkill,
-  type TravelItinerary,
-  type WeatherSummary
+  type TravelItinerary
 } from "@journey/shared";
 import type { JourneyDatabase } from "../db.js";
 import { ItineraryService } from "./itineraryService.js";
@@ -115,6 +114,8 @@ export class AgentService {
             content: [
               "你是旅行规划主 Agent。你必须通过工具调用修改结构化行程，不要只输出文本。",
               "你可以读取导入的旅行风格 Skill、历史会话摘要和当前行程。",
+              "偏好维护要求：如果用户在对话中表达了可复用的稳定偏好、禁忌或自定义偏好类型，必须调用 update_itinerary_details，把 preferences 更新为“当前已有偏好 + 新偏好”的去重结果；不要覆盖用户已有偏好，也不要把一次性的具体活动当作长期偏好。",
+              "当用户表达负向偏好时，用“避开/避免 + 对象”的短语写入 preferences，例如“避开排队”“避免太赶”。",
               "普通用户不需要看到内部 Agent 名称，但 trace 会用于开发后台。",
               "回复正文只做简短总结，不要列出本轮 diff；系统会在对话末尾追加结构化改动清单。"
             ].join("\n")
@@ -134,6 +135,7 @@ export class AgentService {
               })),
               previousMessages: previousSessions.flatMap((session) => session.messages).slice(-12),
               previousSessionSummaries: previousSessions.map((session) => session.contextSummary).filter(Boolean),
+              currentPreferences: itinerary.preferences,
               userPreferenceSummary: preferenceSummary
             })
           }
@@ -296,8 +298,7 @@ export class AgentService {
       throwIfAborted(input.signal);
       saved = this.applyItineraryDetailChanges(saved, changes, detailDiff);
     }
-    const weatherDiff: string[] = [];
-    saved = await this.updateWeatherForDays(saved, traces, sessionId, weatherDiff, input.signal);
+    saved = this.applyConversationPreferences(saved, input.message, traces, sessionId, detailDiff);
     for (const request of placeUpdateRequests) {
       saved = await this.applyPlaceUpdateTool(saved, request, traces, sessionId, placeDiff, input.signal);
     }
@@ -321,7 +322,7 @@ export class AgentService {
     for (const request of timingAdjustmentRequests) {
       saved = this.applyTimingAdjustmentTool(saved, request, traces, sessionId, timingDiff);
     }
-    const resultDiff = [...patched.diff, ...detailDiff, ...weatherDiff, ...placeDiff, ...transportDiff, ...timingDiff];
+    const resultDiff = [...patched.diff, ...detailDiff, ...placeDiff, ...transportDiff, ...timingDiff];
     traces.push(this.trace(sessionId, "CriticAgent", "state_patch", "校验并保存行程", resultDiff.join("；") || "无结构化变更"));
     throwIfAborted(input.signal);
     for (const trace of traces) this.db.saveTrace(trace);
@@ -399,6 +400,8 @@ export class AgentService {
         this.trace(sessionId, "PlannerAgent", "message", "提出路线修复方案", "仅提供方案，等待用户选择后再修改画布。"),
         this.trace(sessionId, "CriticAgent", "message", "确认未修改画布", "本轮 diff 为空。")
       ];
+      const detailDiff: string[] = [];
+      const saved = this.applyConversationPreferences(itinerary, input.message, traces, sessionId, detailDiff);
       for (const trace of traces) this.db.saveTrace(trace);
       const userMessage: ChatMessage = {
         id: createId("msg"),
@@ -414,20 +417,25 @@ export class AgentService {
       };
       const session: AgentSession = {
         id: sessionId,
-        itineraryId: itinerary.id,
+        itineraryId: saved.id,
         messages: [userMessage, assistantMessage],
         importedSkillIds,
         traces,
-        contextSummary: summarizeSession(input.message, itinerary, importedSkills.map((skill) => skill.displayName), previousSessions),
-        userPreferenceSummary: preferenceSummary,
+        contextSummary: summarizeSession(input.message, saved, importedSkills.map((skill) => skill.displayName), previousSessions),
+        userPreferenceSummary: inferPreferenceSummary(
+          saved.preferences,
+          importedSkills.map((skill) => skill.displayName),
+          previousSessions,
+          input.message
+        ),
         createdAt: nowIso(),
         updatedAt: nowIso()
       };
       this.db.saveSession(session);
       return {
-        itinerary,
+        itinerary: saved,
         message: assistantMessage,
-        diff: [],
+        diff: detailDiff,
         traces,
         session
       };
@@ -483,7 +491,6 @@ export class AgentService {
         "融合旅行风格 Skill",
         importedSkills.length ? importedSkills.map((skill) => skill.displayName).join("、") : "未导入 Skill，使用用户偏好。"
       ),
-      this.trace(sessionId, "WeatherAgent", "tool_call", "检查天气约束", "使用高德天气服务，演示环境返回 mock 天气。"),
       this.trace(sessionId, "TransportAgent", "tool_call", "检查路线可行性", "使用高德路线服务，演示环境返回 mock 路线。"),
       this.trace(
         sessionId,
@@ -566,6 +573,7 @@ export class AgentService {
       throwIfAborted(input.signal);
       saved = this.applyItineraryDetailChanges(saved, deterministicDetails, detailDiff);
     }
+    saved = this.applyConversationPreferences(saved, input.message, traces, sessionId, detailDiff);
     const deterministicPlaceDiff: string[] = [];
     for (const request of placeUpdateRequests) {
       saved = await this.applyPlaceUpdateTool(saved, request, traces, sessionId, deterministicPlaceDiff, input.signal);
@@ -573,8 +581,6 @@ export class AgentService {
     for (const request of deterministicPlaceActivityRequests) {
       saved = await this.applyPlaceActivityTool(saved, request, traces, sessionId, deterministicPlaceDiff, input.signal);
     }
-    const weatherDiff: string[] = [];
-    saved = await this.updateWeatherForDays(saved, traces, sessionId, weatherDiff, input.signal);
     const placeDiff: string[] = [];
     if (activityIntent || routeOnlyIntent) {
       saved = await this.resolveMissingPlaces(saved, traces, sessionId, placeDiff, input.signal);
@@ -602,7 +608,6 @@ export class AgentService {
       ...styleDiff,
       ...detailDiff,
       ...deterministicPlaceDiff,
-      ...weatherDiff,
       ...placeDiff,
       ...transportDiff,
       ...timingDiff
@@ -686,35 +691,6 @@ export class AgentService {
           )
         );
         diff.push(`已解析地点：${place.name}`);
-      }
-    }
-    return current;
-  }
-
-  private async updateWeatherForDays(
-    itinerary: TravelItinerary,
-    traces: AgentTraceEvent[],
-    sessionId: string,
-    diff: string[],
-    signal?: AbortSignal
-  ): Promise<TravelItinerary> {
-    let current = itinerary;
-    for (const day of current.days) {
-      throwIfAborted(signal);
-      const weather = await this.maps.weather(current.destination, day.date);
-      throwIfAborted(signal);
-      if (!hasSameWeather(day.weather, weather)) {
-        current = this.itineraries.setDayWeather(current.id, day.id, weather, "agent");
-        traces.push(
-          this.trace(
-            sessionId,
-            "WeatherAgent",
-            "state_patch",
-            "写入每日天气",
-            `${day.title}：${weather.weather}，${weather.temperature}`
-          )
-        );
-        diff.push(`已更新天气：${day.title} ${weather.weather}`);
       }
     }
     return current;
@@ -1113,6 +1089,21 @@ export class AgentService {
     if (before.preferences.join("|") !== saved.preferences.join("|")) diff.push("已更新偏好");
     if (before.companions.join("|") !== saved.companions.join("|")) diff.push("已更新同行人");
     return saved;
+  }
+
+  private applyConversationPreferences(
+    itinerary: TravelItinerary,
+    message: string,
+    traces: AgentTraceEvent[],
+    sessionId: string,
+    diff: string[]
+  ): TravelItinerary {
+    const learnedPreferences = extractConversationPreferences(message);
+    if (!learnedPreferences.length) return itinerary;
+    const nextPreferences = unique([...itinerary.preferences, ...learnedPreferences]);
+    if (nextPreferences.join("|") === itinerary.preferences.join("|")) return itinerary;
+    traces.push(this.trace(sessionId, "MainAgent", "state_patch", "沉淀对话偏好", learnedPreferences.join("、")));
+    return this.applyItineraryDetailChanges(itinerary, { preferences: nextPreferences }, diff);
   }
 
   private async completeMissingTransportLegs(
@@ -2018,17 +2009,6 @@ function findActivityInItinerary(itinerary: TravelItinerary, activityId: string)
   return undefined;
 }
 
-function hasSameWeather(current: WeatherSummary | undefined, next: WeatherSummary): boolean {
-  return Boolean(
-    current &&
-      current.city === next.city &&
-      current.date === next.date &&
-      current.weather === next.weather &&
-      current.temperature === next.temperature &&
-      current.source === next.source
-  );
-}
-
 function routePoint(activity: Activity): string | undefined {
   if (activity.place?.coordinates) {
     return `${activity.place.coordinates.lng},${activity.place.coordinates.lat}`;
@@ -2148,8 +2128,81 @@ function inferPreferenceSummary(
   return unique([...preferences, ...skillNames, ...previousTokens, ...messageTokens]).join("、") || "暂无稳定偏好";
 }
 
+function extractConversationPreferences(message: string): string[] {
+  if (isPreferenceRemovalRequest(message)) return [];
+  const explicit = parseDetailList(extractDetailText(message, ["旅行偏好", "偏好", "喜好", "风格"]));
+  const hasPreferenceCue = /(偏好|喜好|喜欢|不喜欢|讨厌|希望|以后|后续|下次|每次|总是|优先|尽量|避免|避开|不要|少一点|多一点)/.test(message);
+  const durableTokens = [
+    "慢节奏",
+    "不赶路",
+    "少走路",
+    "少排队",
+    "亲子",
+    "儿童友好",
+    "预算敏感",
+    "低预算",
+    "室内优先",
+    "避开人多",
+    "轻松",
+    "早睡",
+    "晚起"
+  ];
+  const interestTokens = [
+    "咖啡",
+    "citywalk",
+    "博物馆",
+    "园林",
+    "夜景",
+    "海边",
+    "日落",
+    "小店",
+    "拍照",
+    "购物",
+    "甜品",
+    "餐饮休息",
+    "雨天室内",
+    "室内"
+  ];
+  const negativeCue = /(不喜欢|讨厌|避免|避开|不要|少一点|少安排)/.test(message);
+  const learned = [...explicit];
+  for (const token of durableTokens) {
+    if (message.includes(token)) learned.push(negativeCue && !token.startsWith("避") && !token.startsWith("少") ? `避免${token}` : token);
+  }
+  if (hasPreferenceCue) {
+    for (const token of interestTokens) {
+      if (message.includes(token)) learned.push(negativeCue ? `避免${token}` : token);
+    }
+  }
+  return unique(learned).filter((item) => item.length <= 24);
+}
+
+function isPreferenceRemovalRequest(message: string): boolean {
+  return /(删除|移除|清除|去掉|取消).{0,8}(偏好|喜好|风格)/.test(message);
+}
+
 function splitPreferenceText(text: string): string[] {
-  const known = ["慢节奏", "咖啡", "citywalk", "亲子", "博物馆", "海边", "日落", "小店", "雨天", "室内", "夜景", "不赶路"];
+  const known = [
+    "慢节奏",
+    "咖啡",
+    "citywalk",
+    "亲子",
+    "儿童友好",
+    "博物馆",
+    "园林",
+    "海边",
+    "日落",
+    "小店",
+    "雨天",
+    "室内",
+    "夜景",
+    "不赶路",
+    "少走路",
+    "少排队",
+    "预算敏感",
+    "拍照",
+    "购物",
+    "避开人多"
+  ];
   return known.filter((token) => text.includes(token));
 }
 

@@ -71,7 +71,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
   });
 
   app.post("/api/itineraries/:id/days", (req, res) => {
-    const itinerary = itineraries.addDay(req.params.id, asString(req.body?.title));
+    const position = req.body?.position === "before" ? "before" : "after";
+    const itinerary = itineraries.addDay(req.params.id, asString(req.body?.title), position);
     res.status(201).json({ itinerary });
   });
 

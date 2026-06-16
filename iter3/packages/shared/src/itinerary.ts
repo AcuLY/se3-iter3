@@ -43,6 +43,7 @@ export function createDraftItinerary(input: CreateItineraryInput): TravelItinera
     id: createId("trip"),
     title: input.title,
     destination: input.destination,
+    destinationPlace: input.destinationPlace,
     startDate: input.startDate,
     endDate: input.endDate ?? addDays(input.startDate, dayCount - 1),
     companions: input.companions ?? [],
@@ -228,6 +229,27 @@ export function addDay(itinerary: TravelItinerary, title?: string): TravelItiner
     ...itinerary,
     endDate: date,
     days: [...itinerary.days, nextDay]
+  });
+}
+
+export function addDayBefore(itinerary: TravelItinerary, title?: string): TravelItinerary {
+  const date = addDays(itinerary.startDate, -1);
+  const nextDay: ItineraryDay = {
+    id: createId("day"),
+    title: title ?? "Day 1",
+    date,
+    activities: [],
+    transportLegs: []
+  };
+  const days = [nextDay, ...itinerary.days].map((day, index) => ({
+    ...day,
+    title: /^Day \d+$/.test(day.title) ? `Day ${index + 1}` : day.title
+  }));
+  return touchManual({
+    ...itinerary,
+    startDate: date,
+    endDate: itinerary.endDate ?? itinerary.days.at(-1)?.date ?? itinerary.startDate,
+    days
   });
 }
 

@@ -399,6 +399,11 @@ describe("Travel Skill Agent frontend", () => {
 
     const editor = await screen.findByRole("region", { name: "编辑活动" });
     expect(within(editor).getByLabelText("第 3 项活动名称")).toHaveValue("");
+    const timeBudget = within(editor).getByRole("group", { name: "时间与预算" });
+    expect(timeBudget).toHaveClass("sm:grid-cols-3");
+    expect(within(timeBudget).getByLabelText("待补全安排 的开始时间")).toBeInTheDocument();
+    expect(within(timeBudget).getByLabelText("待补全安排 的结束时间")).toBeInTheDocument();
+    expect(within(timeBudget).getByLabelText("待补全安排 的预算")).toBeInTheDocument();
 
     const timelineItem = screen.getByRole("listitem", { name: /第 3 站：第 3 项安排/ });
     expect(within(timelineItem).queryByLabelText("第 3 项活动名称")).not.toBeInTheDocument();
@@ -445,7 +450,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.clear(screen.getByLabelText("在地图上搜索地点"));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -469,7 +474,7 @@ describe("Travel Skill Agent frontend", () => {
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
     await user.click(screen.getByRole("button", { name: "编辑西湖晨间散步" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.clear(screen.getByLabelText("在地图上搜索地点"));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -497,7 +502,7 @@ describe("Travel Skill Agent frontend", () => {
     });
 
     await user.click(screen.getByRole("button", { name: "编辑西湖晨间散步" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.clear(screen.getByLabelText("在地图上搜索地点"));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -554,7 +559,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "temple");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
 
@@ -612,7 +617,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.clear(screen.getByLabelText("在地图上搜索地点"));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "南山路咖啡馆");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -653,7 +658,7 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
     expect(screen.queryByLabelText("第 1 项活动名称")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.click(screen.getByRole("button", { name: "在行程中编辑西湖晨间散步" }));
 
     expect(screen.getByTestId("activity-drop-0")).toHaveAttribute("data-selected", "true");
@@ -675,7 +680,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByTestId("map-day-place-list")).not.toBeInTheDocument();
     expect(screen.queryByText("进入地图编辑后可搜索地点、选择地点卡和查看路线段。")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     const placeList = screen.getByTestId("map-day-place-list");
     expect(Array.from(placeList.classList)).toContain("grid-cols-1");
     expect(Array.from(placeList.classList)).toContain("sm:[grid-template-columns:repeat(auto-fit,minmax(160px,1fr))]");
@@ -688,7 +693,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
 
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     const placeList = within(editWorkspace).getByTestId("map-day-place-list");
@@ -711,7 +716,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
 
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     expect(editWorkspace).toHaveClass("fixed");
@@ -733,7 +738,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
 
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     const inspector = within(editWorkspace).getByTestId("map-edit-inspector");
@@ -754,7 +759,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     await user.click(within(editWorkspace).getByRole("button", { name: "路线 1" }));
 
@@ -770,7 +775,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     await user.click(within(editWorkspace).getByRole("button", { name: "路线 1" }));
 
@@ -789,7 +794,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     const editWorkspace = screen.getByRole("region", { name: "地图编辑工作区" });
     await user.click(within(editWorkspace).getByRole("button", { name: "路线 1" }));
 
@@ -825,12 +830,9 @@ describe("Travel Skill Agent frontend", () => {
     expect(dialog.parentElement).toHaveClass("z-[1200]");
     expect(within(dialog).getByLabelText("返回日期")).toBeInTheDocument();
     expect(within(dialog).getByLabelText("行程备注")).toBeInTheDocument();
-    const companions = within(dialog).getByLabelText("同行人");
-    expect(companions).toHaveValue("朋友");
-    await user.clear(companions);
-    await user.type(companions, "家人, 孩子");
+    expect(within(dialog).queryByLabelText("同行人")).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "应用信息" }));
-    expect(screen.getByText("同行 家人、孩子")).toBeInTheDocument();
+    expect(screen.getByText("同行 朋友")).toBeInTheDocument();
     expect(within(tripSummary).queryByLabelText("返回日期")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "收起信息" })).not.toBeInTheDocument();
   });
@@ -841,7 +843,7 @@ describe("Travel Skill Agent frontend", () => {
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
     await user.click(screen.getByRole("button", { name: "Day 2" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.click(await screen.findByRole("button", { name: "添加灵隐寺到 Day 2" }));
@@ -975,7 +977,7 @@ describe("Travel Skill Agent frontend", () => {
     const routeList = within(editWorkspace).getByTestId("map-day-route-list");
     const selectedRoute = within(routeList).getByRole("button", { name: "查看路线：西湖晨间散步 到 湖滨咖啡" });
     expect(selectedRoute.closest("[data-selected]")).toHaveAttribute("data-selected", "true");
-    expect(screen.getByRole("button", { name: "完成地图编辑" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "收起地图" })).toBeInTheDocument();
   });
 
   it("opens the selected day route panel when returning from the timeline after viewing the full-trip map", async () => {
@@ -999,7 +1001,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.clear(screen.getByLabelText("在地图上搜索地点"));
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -1082,7 +1084,7 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     await user.click(screen.getByRole("button", { name: "路线 1" }));
 
     const mapRouteSegment = await screen.findByRole("button", { name: "查看路线：西湖晨间散步 到 湖滨咖啡" });
@@ -1104,8 +1106,8 @@ describe("Travel Skill Agent frontend", () => {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
-    expect(screen.getByRole("button", { name: "完成地图编辑" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
+    expect(screen.getByRole("button", { name: "收起地图" })).toBeInTheDocument();
 
     await user.type(screen.getByLabelText("在地图上搜索地点"), "灵隐寺");
     await user.click(screen.getByRole("button", { name: "搜索地点" }));
@@ -1186,7 +1188,7 @@ describe("Travel Skill Agent frontend", () => {
     );
     expect(within(mapRiskSummary).getByRole("button", { name: "延后下一项到 11:45" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "编辑地图" }));
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
     expect(screen.queryByRole("region", { name: "路线风险" })).not.toBeInTheDocument();
     expect(screen.queryByTestId("map-route-risk-list")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "风险 1" }));
@@ -1902,6 +1904,10 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByRole("button", { name: "更新路线" })).not.toBeInTheDocument();
     expect(screen.queryByText("高德路线")).not.toBeInTheDocument();
     expect(screen.queryByText("路线、距离和耗时来自高德")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "编辑路线细节：西湖晨间散步 到 湖滨咖啡" }));
+    expect(screen.queryByRole("button", { name: "重新规划" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新规划路线" })).toBeInTheDocument();
   });
 
   it("keeps global header actions separate from day planning actions", async () => {
@@ -1911,17 +1917,35 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
     const headerActions = screen.getByTestId("workbench-header-actions");
-    expect(within(headerActions).queryByRole("button", { name: "添加日期" })).not.toBeInTheDocument();
+    expect(within(headerActions).queryByRole("button", { name: "前加一天" })).not.toBeInTheDocument();
+    expect(within(headerActions).queryByRole("button", { name: "后加一天" })).not.toBeInTheDocument();
     expect(within(headerActions).getByRole("button", { name: "导出" })).toBeInTheDocument();
     expect(within(headerActions).getByRole("button", { name: "编辑行程信息" })).toBeInTheDocument();
 
     const contextBar = screen.getByRole("navigation", { name: "行程日期和当前编辑上下文" });
-    expect(within(contextBar).getByRole("button", { name: "添加日期" })).toBeInTheDocument();
+    expect(within(contextBar).getByRole("button", { name: "前加一天" })).toBeInTheDocument();
+    expect(within(contextBar).getByRole("button", { name: "后加一天" })).toBeInTheDocument();
     expect(within(contextBar).getByRole("button", { name: "添加活动" })).toBeInTheDocument();
     expect(screen.getByTestId("trip-info-summary")).toHaveClass("hidden");
     expect(screen.getByTestId("map-canvas")).toHaveClass("min-h-[160px]");
     expect(screen.getByTestId("map-overview-panel")).toHaveClass("hidden");
     expect(screen.getByTestId("map-overview-panel")).toHaveClass("sm:block");
+  });
+
+  it("can add a new date before the selected date", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.click(screen.getByRole("button", { name: "前加一天" }));
+
+    expect(screen.getByRole("button", { name: "Day 4" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Day 1" })).toBeInTheDocument();
+    expect(screen.getByText("2026-06-30 · 0 项安排 · 暂无路线")).toBeInTheDocument();
+    expect(screen.getByText("这一天还没有安排")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Day 2" }));
+    expect(screen.getByRole("listitem", { name: /第 1 站：西湖晨间散步/ })).toBeInTheDocument();
   });
 
   it("summarizes incomplete nonblank activities without repeating missing field labels", async () => {
@@ -1971,6 +1995,10 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
 
     expect(getByTestId("app-shell")).toHaveClass("2xl:grid-cols-[280px_minmax(0,1fr)_380px]");
+    expect(getByTestId("app-shell")).toHaveClass("h-dvh");
+    expect(getByTestId("app-shell")).toHaveClass("overflow-hidden");
+    expect(getByTestId("workbench-main")).toHaveClass("overflow-hidden");
+    expect(getByTestId("workbench-scroll")).toHaveClass("overflow-auto");
     expect(getByTestId("app-shell").className).not.toContain("min-[1360px]:grid-cols");
     expect(getByTestId("app-shell").className).not.toContain("xl:grid-cols-[248px_minmax(0,1fr)_340px]");
     expect(screen.getByRole("button", { name: "打开旅行助手" })).toHaveClass("2xl:hidden");
@@ -2011,19 +2039,15 @@ describe("Travel Skill Agent frontend", () => {
       expect(screen.queryByRole("dialog", { name: "旅行风格选择" })).not.toBeInTheDocument();
     });
     expect(screen.getByRole("button", { name: "移出当前风格 慢节奏街区漫步" })).toBeInTheDocument();
-    expect(screen.getByText("已使用「慢节奏街区漫步」。")).toBeInTheDocument();
-    expect(screen.getByText("影响范围")).toBeInTheDocument();
-    expect(screen.getAllByText(/节奏：减少赶场，保留休息段/).length).toBeGreaterThan(0);
-    expect(screen.getByText("适配当前行程")).toBeInTheDocument();
-    expect(screen.getByText(/匹配当前偏好：慢节奏、咖啡、citywalk/)).toBeInTheDocument();
-    expect(screen.getByText("优先遵循")).toBeInTheDocument();
-    expect(screen.getByText(/每天保留至少一个长休息段/)).toBeInTheDocument();
-    expect(screen.getAllByText("需要避开").length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/后续规划会避开：连续三个重体力景点/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("region", { name: "当前风格对规划的影响" })).not.toBeInTheDocument();
+    expect(screen.queryByText("已使用「慢节奏街区漫步」。")).not.toBeInTheDocument();
+    expect(screen.queryByText("适配当前行程")).not.toBeInTheDocument();
+    expect(screen.queryByText("优先遵循")).not.toBeInTheDocument();
+    expect(screen.queryByText(/后续规划会避开：连续三个重体力景点/)).not.toBeInTheDocument();
     expect(screen.queryByText("本轮改动")).not.toBeInTheDocument();
   });
 
-  it("keeps imported skill influence visible as planning tradeoffs without exposing agent internals", async () => {
+  it("keeps imported skills as removable chips without exposing planning internals", async () => {
     const user = userEvent.setup();
     render(<App />);
 
@@ -2036,17 +2060,12 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "浏览风格" }));
     await user.click(screen.getByRole("button", { name: "使用 亲子博物馆路线" }));
 
-    const influence = await screen.findByRole("region", { name: "当前风格对规划的影响" });
-    expect(within(influence).getByText("2 个风格正在影响本次规划")).toBeInTheDocument();
-    expect(within(influence).getByText("后续规划会优先这样取舍")).toBeInTheDocument();
-    expect(within(influence).getByText(/节奏：减少赶场，保留休息段/)).toBeInTheDocument();
-    expect(within(influence).getByText(/备选：天气不佳时优先室内和可预约地点/)).toBeInTheDocument();
-    expect(within(influence).getByText("规则取舍详情")).toBeInTheDocument();
-    expect(within(influence).getByText(/慢节奏街区漫步 × 亲子博物馆路线/)).toBeInTheDocument();
-    expect(within(influence).getByText(/休息段优先/)).toBeInTheDocument();
-    expect(within(influence).getByText("需要避开")).toBeInTheDocument();
-    expect(within(influence).getByText(/连续三个重体力景点/)).toBeInTheDocument();
-    expect(influence).not.toHaveTextContent(/Agent|trace|tool|上下文|主 Agent/i);
+    expect(screen.getByRole("button", { name: "移出当前风格 慢节奏街区漫步" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "移出当前风格 亲子博物馆路线" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "当前风格对规划的影响" })).not.toBeInTheDocument();
+    expect(screen.queryByText("规则取舍详情")).not.toBeInTheDocument();
+    expect(screen.queryByText(/慢节奏街区漫步 × 亲子博物馆路线/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Agent|trace|tool|上下文|主 Agent/i)).not.toBeInTheDocument();
   });
 
   it("keeps activity editing and route editing mutually focused", async () => {
@@ -2077,7 +2096,10 @@ describe("Travel Skill Agent frontend", () => {
     await waitFor(() => {
       expect(contextBar).toHaveTextContent("1/1 段路线");
     });
-    expect(within(contextBar).getByTestId("selected-canvas-context")).toHaveTextContent("选择活动或路线查看详情");
+    expect(within(contextBar).queryByTestId("selected-canvas-context")).not.toBeInTheDocument();
+    expect(contextBar).not.toHaveTextContent("当前日期");
+    expect(contextBar).not.toHaveTextContent("选择活动或路线查看详情");
+    expect(contextBar).not.toHaveTextContent("先添加当天安排");
 
     await user.click(screen.getByRole("button", { name: "编辑西湖晨间散步" }));
 
@@ -2209,6 +2231,8 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "Skill 广场" }));
     await user.click(screen.getByRole("button", { name: "导入风格" }));
     const importDialog = screen.getByRole("dialog", { name: "导入旅行风格" });
+    expect(within(importDialog).queryByText(/SKILL\.md/i)).not.toBeInTheDocument();
+    expect(within(importDialog).getByText("粘贴旅行风格内容，校验通过后保存到风格库。")).toBeInTheDocument();
     await user.type(
       within(importDialog).getByLabelText("粘贴风格内容"),
       [
@@ -2241,9 +2265,8 @@ describe("Travel Skill Agent frontend", () => {
 
     await user.click(screen.getByRole("button", { name: "打开当前行程：杭州三日松弛游" }));
     expect(screen.getByRole("button", { name: "移出当前风格 Rainy Cafe Style" })).toBeInTheDocument();
-    expect(screen.getByText("影响范围")).toBeInTheDocument();
-    expect(screen.getAllByText(/备选：天气不佳时优先室内和可预约地点/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/后续规划会避开：暴雨时安排长距离户外步行/).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("region", { name: "当前风格对规划的影响" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/后续规划会避开：暴雨时安排长距离户外步行/)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "浏览风格" }));
     expect(screen.getAllByText("Rainy Cafe Style").length).toBeGreaterThan(1);
     expect(screen.queryByText(/避免：暴雨时安排长距离户外步行/)).not.toBeInTheDocument();
@@ -2494,3 +2517,4 @@ describe("Travel Skill Agent frontend", () => {
     });
   });
 });
+

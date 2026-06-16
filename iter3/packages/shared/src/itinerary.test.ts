@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addActivity,
   addDay,
+  addDayBefore,
   applyItineraryPatch,
   createDraftItinerary,
   detectTransportTimingConflict,
@@ -51,6 +52,29 @@ describe("itinerary editing helpers", () => {
       "2026-07-04"
     ]);
     expect(draft.endDate).toBe("2026-07-04");
+  });
+
+  it("adds a day before the current trip without moving existing plans", () => {
+    let itinerary = createDraftItinerary({
+      title: "苏州园林",
+      destination: "苏州",
+      startDate: "2026-07-01",
+      endDate: "2026-07-02"
+    });
+    itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
+      type: "attraction",
+      title: "拙政园",
+      placeName: "拙政园"
+    });
+
+    itinerary = addDayBefore(itinerary);
+
+    expect(itinerary.startDate).toBe("2026-06-30");
+    expect(itinerary.endDate).toBe("2026-07-02");
+    expect(itinerary.days.map((day) => day.title)).toEqual(["Day 1", "Day 2", "Day 3"]);
+    expect(itinerary.days.map((day) => day.date)).toEqual(["2026-06-30", "2026-07-01", "2026-07-02"]);
+    expect(itinerary.days[0]!.activities).toHaveLength(0);
+    expect(itinerary.days[1]!.activities[0]?.title).toBe("拙政园");
   });
 
   it("resizes itinerary days when the date range changes while preserving in-range plans", () => {

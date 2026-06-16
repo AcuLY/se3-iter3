@@ -1,6 +1,7 @@
 import {
   addActivity,
   addDay,
+  addDayBefore,
   createDraftItinerary,
   exportItineraryMarkdown,
   findActivity,
@@ -13,6 +14,7 @@ import {
   setDayWeather,
   setTransportLeg,
   updateActivity,
+  PlaceSchema,
   type ActivityDraft,
   type Activity,
   type CreateItineraryInput,
@@ -41,10 +43,7 @@ export class ItineraryService {
     return this.db.saveItinerary(itinerary);
   }
 
-  update(
-    itineraryId: string,
-    changes: Partial<Pick<TravelItinerary, "title" | "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions">>
-  ): TravelItinerary {
+  update(itineraryId: string, changes: ItineraryDetailChanges): TravelItinerary {
     const itinerary = this.get(itineraryId);
     const cleaned = cleanItineraryChanges(changes);
     const dateAdjusted =
@@ -85,9 +84,9 @@ export class ItineraryService {
     return this.db.saveItinerary(addActivity(itinerary, dayId, activity, source));
   }
 
-  addDay(itineraryId: string, title?: string): TravelItinerary {
+  addDay(itineraryId: string, title?: string, position: "after" | "before" = "after"): TravelItinerary {
     const itinerary = this.get(itineraryId);
-    return this.db.saveItinerary(addDay(itinerary, title));
+    return this.db.saveItinerary(position === "before" ? addDayBefore(itinerary, title) : addDay(itinerary, title));
   }
 
   updateActivity(itineraryId: string, activityId: string, changes: Partial<Activity>): TravelItinerary {
@@ -165,12 +164,23 @@ export class ItineraryService {
   }
 }
 
-function cleanItineraryChanges(
-  changes: Partial<Pick<TravelItinerary, "title" | "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions">>
-): Partial<Pick<TravelItinerary, "title" | "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions">> {
-  const cleaned: Partial<Pick<TravelItinerary, "title" | "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions">> = {};
+type ItineraryDetailChanges = Partial<
+  Pick<
+    TravelItinerary,
+    "title" | "destination" | "destinationPlace" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions"
+  >
+>;
+
+function cleanItineraryChanges(changes: ItineraryDetailChanges): ItineraryDetailChanges {
+  const cleaned: ItineraryDetailChanges = {};
   if (typeof changes.title === "string") cleaned.title = changes.title.trim();
   if (typeof changes.destination === "string") cleaned.destination = changes.destination.trim();
+  if ("destinationPlace" in changes) {
+    const parsedPlace = PlaceSchema.safeParse(changes.destinationPlace);
+    cleaned.destinationPlace = parsedPlace.success ? parsedPlace.data : undefined;
+  } else if (typeof changes.destination === "string") {
+    cleaned.destinationPlace = undefined;
+  }
   if (typeof changes.startDate === "string") cleaned.startDate = changes.startDate;
   if (typeof changes.endDate === "string") cleaned.endDate = changes.endDate;
   if (typeof changes.budgetCny === "number") cleaned.budgetCny = changes.budgetCny;

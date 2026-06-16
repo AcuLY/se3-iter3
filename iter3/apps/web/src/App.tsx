@@ -1,6 +1,7 @@
 import {
   addActivity,
   addDay,
+  addDayBefore,
   aggregateEvaluation,
   appendSkillVersion,
   buildExtractedSkillDraftTitle,
@@ -74,7 +75,7 @@ import {
   WandSparkles,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
 import { apiDelete, apiEventStream, apiGet, apiPost, apiPatch, apiText } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -96,6 +97,7 @@ const ASSISTANT_PROMPT_SUGGESTIONS = [
 type CreateTripFormInput = {
   title: string;
   destination: string;
+  destinationPlace?: Place;
   startDate: string;
   endDate: string;
   budgetCny?: number;
@@ -523,7 +525,7 @@ export default function App() {
   );
   const showAgentPanel = page === "workbench";
   const shellGridClass = showAgentPanel
-    ? "grid min-h-screen grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_380px]"
+    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden lg:grid-cols-[72px_minmax(0,1fr)_360px] 2xl:grid-cols-[280px_minmax(0,1fr)_380px]"
     : "grid min-h-screen grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]";
 
   async function addManualActivity(activity?: ActivityDraft) {
@@ -652,7 +654,6 @@ export default function App() {
 
   async function importSkill(skillId: string, knownSkill?: TravelSkill) {
     const currentSkill = knownSkill ?? skills.find((skill) => skill.id === skillId);
-    const alreadyImported = importedSkillIds.includes(skillId) || itinerary.importedSkillIds.includes(skillId);
     markSaving();
     setImportedSkillIds((current) => (current.includes(skillId) ? current : [...current, skillId]));
     const result = await apiPost<{ itinerary: TravelItinerary; skill?: TravelSkill }>(
@@ -676,14 +677,6 @@ export default function App() {
     const normalized = commitSavedItinerary(result.itinerary);
     setImportedSkillIds(normalized.importedSkillIds);
     if (result.skill) replaceSkill(result.skill);
-    const importedSkill = result.skill ?? currentSkill;
-    if (importedSkill && !alreadyImported) {
-      const recommendation = recommendations.find((item) => item.skill.id === importedSkill.id || item.skill.id === skillId);
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: formatSkillImportMessage(importedSkill, normalized, recommendation) }
-      ]);
-    }
   }
 
   async function removeImportedSkill(skillId: string) {
@@ -980,12 +973,18 @@ export default function App() {
     setAgentDrawerOpen(false);
   }
 
-  async function addRemoteDay() {
+  async function addRemoteDay(position: "after" | "before" = "after") {
     markSaving();
-    const fallback = { itinerary: addDay(itinerary) };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days`, {}, fallback);
-    const normalized = commitSavedItinerary(result.itinerary);
-    setSelectedDayId(normalized.days.at(-1)?.id ?? selectedDay.id);
+    const nextItinerary = position === "before" ? addDayBefore(itinerary) : addDay(itinerary);
+    const fallback = { itinerary: nextItinerary };
+    const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days`, { position }, fallback);
+    const shouldRestore =
+      position === "before" && (result.itinerary.startDate !== nextItinerary.startDate || result.itinerary.days[0]?.date !== nextItinerary.days[0]?.date);
+    const saved = shouldRestore
+      ? await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/restore`, { itinerary: nextItinerary }, fallback)
+      : result;
+    const normalized = commitSavedItinerary(saved.itinerary);
+    setSelectedDayId(position === "before" ? normalized.days[0]?.id ?? selectedDay.id : normalized.days.at(-1)?.id ?? selectedDay.id);
   }
 
   async function exportItinerary() {
@@ -1047,10 +1046,11 @@ export default function App() {
     const day = itinerary.days.find((candidate) => candidate.id === dayId);
     if (!day) return;
     markSaving();
-    const weather = createFallbackWeather(itinerary.destination, day.date);
+    const weatherCity = itinerary.destinationPlace?.city ?? itinerary.destination;
+    const weather = createFallbackWeather(weatherCity, day.date);
     const result = await apiPost<{ itinerary: TravelItinerary; weather: WeatherSummary }>(
       `/itineraries/${itinerary.id}/days/${dayId}/weather`,
-      { city: itinerary.destination },
+      { city: weatherCity },
       {
         weather,
         itinerary: setDayWeather(itinerary, dayId, weather)
@@ -1108,6 +1108,7 @@ export default function App() {
       itinerary: createDraftItinerary({
         title: normalizedInput.title,
         destination: normalizedInput.destination,
+        destinationPlace: normalizedInput.destinationPlace,
         startDate: normalizedInput.startDate,
         endDate: normalizedInput.endDate,
         budgetCny: normalizedInput.budgetCny,
@@ -1144,7 +1145,10 @@ export default function App() {
             onArchiveItinerary={(itineraryId) => void archiveItinerary(itineraryId)}
             onDeleteItinerary={(itineraryId) => void deleteItineraryFromHistory(itineraryId)}
           />
-          <main className="min-w-0 bg-white">
+          <main
+            data-testid={page === "workbench" ? "workbench-main" : undefined}
+            className={cn("min-w-0 bg-white", page === "workbench" && "min-h-0 overflow-hidden")}
+          >
             {page === "workbench" && (
               <Workbench
                 itinerary={itinerary}
@@ -1170,6 +1174,9 @@ export default function App() {
                 onCompleteRoutes={completeMissingRoutes}
                 onUpdateDayWeather={updateDayWeather}
                 onOpenAgent={() => setAgentDrawerOpen(true)}
+                onMapWorkspaceOpenChange={(open) => {
+                  if (open) setAgentDrawerOpen(false);
+                }}
                 onFocusTargetConsumed={() => setCanvasFocusTarget(null)}
               />
             )}
@@ -1218,15 +1225,15 @@ export default function App() {
                   type="button"
                   aria-label="关闭助手面板"
                   data-testid="agent-backdrop"
-                  className="fixed inset-0 z-[900] bg-black/30 2xl:hidden"
+                  className="fixed inset-0 z-[900] bg-black/30 lg:hidden"
                   onClick={() => setAgentDrawerOpen(false)}
                 />
               )}
               <div
                 data-testid="agent-panel-shell"
                 className={cn(
-                  "fixed inset-y-0 right-0 z-[1000] w-full shadow-2xl sm:w-[min(420px,calc(100vw-24px))] 2xl:static 2xl:w-auto 2xl:shadow-none",
-                  agentDrawerOpen ? "block" : "hidden 2xl:block"
+                  "fixed inset-y-0 right-0 z-[1000] w-full border-l border-border bg-[#fbfbf9] shadow-2xl sm:w-[min(420px,calc(100vw-24px))] lg:static lg:min-h-0 lg:w-auto lg:shadow-none",
+                  agentDrawerOpen ? "block" : "hidden lg:block"
                 )}
               >
                 <AgentPanel
@@ -1707,7 +1714,7 @@ function formatCompactDateTime(value: string): string {
 
 function normalizeCreateTripInput(input: CreateTripFormInput): CreateTripFormInput {
   const title = input.title.trim() || "未命名旅行";
-  const destination = input.destination.trim() || "待定目的地";
+  const destination = input.destination.trim() || input.destinationPlace?.city?.replace(/市$/, "") || input.destinationPlace?.name || "待定目的地";
   const startDate = input.startDate || new Date().toISOString().slice(0, 10);
   const endDate = input.endDate && input.endDate >= startDate ? input.endDate : startDate;
   return {
@@ -1769,6 +1776,7 @@ function HomePage({
 }) {
   const [title, setTitle] = useState("杭州周末旅行");
   const [destination, setDestination] = useState("杭州");
+  const [destinationPlace, setDestinationPlace] = useState<PlaceSearchItem | null>(null);
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-07-03");
   const [budget, setBudget] = useState("1800");
@@ -1777,9 +1785,11 @@ function HomePage({
   const [notes, setNotes] = useState("每天午后留出休息，避免连续跨区。");
 
   function submitTrip() {
+    if (!destinationPlace) return;
     void onCreateTrip({
       title,
-      destination,
+      destination: destinationTextFromSearchPlace(destinationPlace),
+      destinationPlace: placeFromSearchItem(destinationPlace),
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
@@ -1828,7 +1838,24 @@ function HomePage({
             </CardHeader>
             <CardContent className="grid gap-3 md:grid-cols-2">
               <Input value={title} onChange={(event) => setTitle(event.target.value)} aria-label="旅行名称" />
-              <Input value={destination} onChange={(event) => setDestination(event.target.value)} aria-label="目的地" />
+              <div className="md:col-span-2">
+                <PoiSearchField
+                  value={destination}
+                  selectedPlace={destinationPlace ? placeFromSearchItem(destinationPlace) : null}
+                  city={destination}
+                  ariaLabel="目的地"
+                  placeholder="搜索城市、景区或商圈"
+                  selectionHint="请选择一个高德地点后创建行程"
+                  onQueryChange={(value) => {
+                    setDestination(value);
+                    setDestinationPlace(null);
+                  }}
+                  onSelect={(place) => {
+                    setDestination(destinationTextFromSearchPlace(place));
+                    setDestinationPlace(place);
+                  }}
+                />
+              </div>
               <Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} aria-label="出发日期" />
               <Input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} aria-label="返回日期" />
               <Input value={budget} onChange={(event) => setBudget(event.target.value)} aria-label="预算" />
@@ -1840,7 +1867,7 @@ function HomePage({
                 aria-label="行程备注"
                 className="min-h-20 md:col-span-2"
               />
-              <Button className="md:col-span-2" onClick={submitTrip}>
+              <Button className="md:col-span-2" onClick={submitTrip} disabled={!destinationPlace}>
                 <MapPinned data-icon="inline-start" />
                 创建并规划
               </Button>
@@ -1873,6 +1900,7 @@ function NewTripDialog({
 }) {
   const [title, setTitle] = useState("");
   const [destination, setDestination] = useState("");
+  const [destinationPlace, setDestinationPlace] = useState<PlaceSearchItem | null>(null);
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-07-03");
   const [budget, setBudget] = useState("");
@@ -1883,9 +1911,11 @@ function NewTripDialog({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!destinationPlace) return;
     void onCreateTrip({
       title,
-      destination,
+      destination: destinationTextFromSearchPlace(destinationPlace),
+      destinationPlace: placeFromSearchItem(destinationPlace),
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
@@ -1918,10 +1948,24 @@ function NewTripDialog({
             旅行名称
             <Input value={title} onChange={(event) => setTitle(event.target.value)} aria-label="新建行程名称" placeholder="例如：杭州周末旅行" />
           </label>
-          <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-            目的地
-            <Input value={destination} onChange={(event) => setDestination(event.target.value)} aria-label="新建行程目的地" placeholder="例如：杭州" />
-          </label>
+          <div className="md:col-span-2">
+            <PoiSearchField
+              value={destination}
+              selectedPlace={destinationPlace ? placeFromSearchItem(destinationPlace) : null}
+              city={destination}
+              ariaLabel="新建行程目的地"
+              placeholder="搜索城市、景区或商圈"
+              selectionHint="请选择一个高德地点后创建行程"
+              onQueryChange={(value) => {
+                setDestination(value);
+                setDestinationPlace(null);
+              }}
+              onSelect={(place) => {
+                setDestination(destinationTextFromSearchPlace(place));
+                setDestinationPlace(place);
+              }}
+            />
+          </div>
           <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
             出发日期
             <Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} aria-label="新建行程出发日期" />
@@ -1967,7 +2011,7 @@ function NewTripDialog({
           <Button type="button" variant="outline" className="rounded-full" onClick={onClose}>
             取消
           </Button>
-          <Button type="submit" className="rounded-full">
+          <Button type="submit" className="rounded-full" disabled={!destinationPlace}>
             <MapPinned data-icon="inline-start" />
             创建并规划
           </Button>
@@ -2006,17 +2050,23 @@ function Sidebar({
     counts[item.title] = (counts[item.title] ?? 0) + 1;
     return counts;
   }, {});
-  const showFullHistory = page === "workbench";
+  const compactSidebar = page === "workbench";
+  const showFullHistory = page === "workbench" || page === "creator";
   return (
-    <aside className="hidden min-h-screen flex-col border-r border-border bg-[#fbfbf9] p-4 lg:flex">
-      <button className="mb-6 flex items-center gap-3 text-left text-base font-black" onClick={() => onNavigate("home")}>
+    <aside className={cn("hidden min-h-0 flex-col border-r border-border bg-[#fbfbf9] lg:flex", compactSidebar ? "px-2 py-4 2xl:p-4" : "p-4")}>
+      <button
+        className={cn("mb-6 flex min-h-10 items-center gap-3 text-left text-base font-black", compactSidebar ? "justify-center 2xl:justify-start" : "justify-start")}
+        onClick={() => onNavigate("home")}
+        aria-label="回到首页"
+        title="Journey"
+      >
         <span className="flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground">J</span>
-        Journey
+        <span className={cn(compactSidebar && "hidden 2xl:inline")}>Journey</span>
       </button>
       <div className="flex flex-col gap-2">
-        <Button className="justify-start" onClick={onOpenNewTrip}>
+        <Button className={cn(compactSidebar ? "justify-center px-0 2xl:justify-start 2xl:px-4" : "justify-start")} onClick={onOpenNewTrip} aria-label="新建行程" title="新建行程">
           <Plus data-icon="inline-start" />
-          新建行程
+          <span className={cn(compactSidebar && "hidden 2xl:inline")}>新建行程</span>
         </Button>
         {entries.map((entry) => {
           const Icon = entry.icon;
@@ -2024,18 +2074,20 @@ function Sidebar({
             <Button
               key={entry.page}
               variant={page === entry.page ? "secondary" : "ghost"}
-              className="justify-start"
+              className={cn(compactSidebar ? "justify-center px-0 2xl:justify-start 2xl:px-4" : "justify-start")}
               onClick={() => onNavigate(entry.page)}
+              aria-label={entry.label}
+              title={entry.label}
             >
               <Icon data-icon="inline-start" />
-              {entry.label}
+              <span className={cn(compactSidebar && "hidden 2xl:inline")}>{entry.label}</span>
             </Button>
           );
         })}
       </div>
-      <Separator className="my-5" />
+      <Separator className={cn("my-5", compactSidebar && "hidden 2xl:block")} />
       {showFullHistory ? (
-        <div className="flex flex-1 flex-col gap-3">
+        <div className={cn("flex-1 flex-col gap-3", compactSidebar ? "hidden 2xl:flex" : "flex")}>
           <p className="text-xs font-bold text-muted-foreground">会话记录</p>
           <div className="grid gap-2">
             {itineraries.slice(0, 6).map((item) => {
@@ -2059,11 +2111,6 @@ function Sidebar({
                     >
                       <span className="flex min-w-0 items-start justify-between gap-2">
                         <span className="min-w-0 truncate">{item.title}</span>
-                        {active && (
-                          <span className="shrink-0 rounded-full bg-white px-2 py-0.5 text-[11px] font-black text-foreground">
-                            当前
-                          </span>
-                        )}
                       </span>
                       <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
                         {item.destination} · {compactDateRange(item)} · {item.days.length} 天
@@ -2104,7 +2151,7 @@ function Sidebar({
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 flex-col gap-3">
+        <div className={cn("flex-1 flex-col gap-3", compactSidebar ? "hidden 2xl:flex" : "flex")}>
           <p className="text-xs font-bold text-muted-foreground">当前规划</p>
           <button
             type="button"
@@ -2212,6 +2259,154 @@ function activityDraftFromSearchPlace(place: PlaceSearchItem): ActivityDraft {
   };
 }
 
+function destinationTextFromSearchPlace(place: PlaceSearchItem): string {
+  const city = place.city.trim();
+  if (city) return city.replace(/市$/, "");
+  return place.name.trim();
+}
+
+function amapPoiItems(items: PlaceSearchItem[]): PlaceSearchItem[] {
+  return items.filter(
+    (place) =>
+      place.source === "amap" &&
+      Boolean(place.id) &&
+      Number.isFinite(place.location.lng) &&
+      Number.isFinite(place.location.lat)
+  );
+}
+
+function placeAddressLine(place: Pick<Place, "address" | "city" | "district">): string {
+  return [place.district, place.address].filter(Boolean).join(" · ") || place.city || "高德地点";
+}
+
+function PoiSearchField({
+  value,
+  selectedPlace,
+  city,
+  ariaLabel,
+  placeholder,
+  selectionHint,
+  className,
+  onQueryChange,
+  onSelect
+}: {
+  value: string;
+  selectedPlace?: Place | null;
+  city?: string;
+  ariaLabel: string;
+  placeholder?: string;
+  selectionHint?: string;
+  className?: string;
+  onQueryChange: (value: string) => void;
+  onSelect: (place: PlaceSearchItem) => void;
+}) {
+  const [results, setResults] = useState<PlaceSearchItem[]>([]);
+  const [status, setStatus] = useState("");
+  const [searching, setSearching] = useState(false);
+
+  useEffect(() => {
+    setResults([]);
+    setStatus("");
+  }, [city, value]);
+
+  async function searchPlaces() {
+    const query = value.trim();
+    if (!query) {
+      setResults([]);
+      setStatus("输入关键词后搜索高德地点");
+      return;
+    }
+    setSearching(true);
+    setResults([]);
+    setStatus("正在搜索高德地点...");
+    try {
+      const result = await apiGet<{ items: PlaceSearchItem[] }>(
+        `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(city?.trim() || "全国")}`,
+        { items: [] }
+      );
+      const concreteItems = amapPoiItems(result.items);
+      setResults(concreteItems);
+      setStatus(
+        concreteItems.length > 0
+          ? ""
+          : result.items.length > 0
+            ? "地图服务没有返回可用的高德地点，请换个关键词。"
+            : "没有找到高德地点，请换个关键词。"
+      );
+    } finally {
+      setSearching(false);
+    }
+  }
+
+  function choosePlace(place: PlaceSearchItem) {
+    onSelect(place);
+    setResults([]);
+    setStatus("");
+  }
+
+  return (
+    <div className={cn("grid gap-2", className)}>
+      <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
+        <Input
+          value={value}
+          onChange={(event) => onQueryChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+              event.preventDefault();
+              void searchPlaces();
+            }
+          }}
+          aria-label={ariaLabel}
+          placeholder={placeholder ?? "搜索地点"}
+          autoComplete="off"
+        />
+        <Button type="button" variant="secondary" onClick={searchPlaces} disabled={searching}>
+          <Search data-icon="inline-start" />
+          {searching ? "搜索中" : "搜索"}
+        </Button>
+      </div>
+      {selectedPlace ? (
+        <div className="rounded-xl border border-border bg-white px-3 py-2 text-xs">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <Badge className="bg-[#f6f6f3] text-foreground">已选高德地点</Badge>
+            <span className="min-w-0 truncate font-black text-foreground">{selectedPlace.name}</span>
+          </div>
+          <p className="mt-1 line-clamp-2 font-semibold text-muted-foreground">{placeAddressLine(selectedPlace)}</p>
+        </div>
+      ) : selectionHint ? (
+        <p className="rounded-xl bg-[#f6f6f3] px-3 py-2 text-xs font-semibold text-muted-foreground">{selectionHint}</p>
+      ) : null}
+      {results.length > 0 && (
+        <div role="listbox" aria-label={`${ariaLabel}搜索结果`} className="grid max-h-64 gap-1 overflow-auto rounded-xl border border-border bg-white p-2">
+          {results.map((place) => (
+            <button
+              key={place.id}
+              type="button"
+              role="option"
+              className="grid gap-1 rounded-lg px-3 py-2 text-left text-xs transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              onClick={() => choosePlace(place)}
+            >
+              <span className="flex min-w-0 flex-wrap items-center gap-2">
+                <span className="truncate text-sm font-black text-foreground">{place.name}</span>
+                <Badge className="min-h-6 bg-[#f6f6f3] px-2 text-[11px] text-foreground">{poiCategoryLabel(place)}</Badge>
+              </span>
+              <span className="line-clamp-1 font-semibold text-muted-foreground">{placeAddressLine(place)}</span>
+              {placeMetaItems(place).length > 0 && (
+                <span className="line-clamp-1 font-semibold text-muted-foreground">{placeMetaItems(place).join(" · ")}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      {status && (
+        <p className="rounded-xl bg-[#f6f6f3] px-3 py-2 text-xs font-semibold text-muted-foreground" aria-live="polite">
+          {status}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Workbench({
   itinerary,
   selectedDayId,
@@ -2236,6 +2431,7 @@ function Workbench({
   onCompleteRoutes,
   onUpdateDayWeather,
   onOpenAgent,
+  onMapWorkspaceOpenChange,
   onFocusTargetConsumed
 }: {
   itinerary: TravelItinerary;
@@ -2248,7 +2444,7 @@ function Workbench({
   exportText: string;
   backgroundSyncEnabled: boolean;
   onSelectDay: (dayId: string) => void;
-  onAddDay: () => void;
+  onAddDay: (position?: "after" | "before") => void;
   onAddActivity: (activity?: ActivityDraft) => TravelItinerary | void | Promise<TravelItinerary | void>;
   onUpdateActivity: (activityId: string, changes: Partial<Activity>) => void | Promise<void>;
   onDeleteActivity: (activityId: string) => void | Promise<void>;
@@ -2267,15 +2463,16 @@ function Workbench({
   onCompleteRoutes: (mode?: MapRouteMode) => void | Promise<void>;
   onUpdateDayWeather: (dayId: string) => void | Promise<void>;
   onOpenAgent: () => void;
+  onMapWorkspaceOpenChange?: (open: boolean) => void;
   onFocusTargetConsumed: () => void;
 }) {
   const day = itinerary.days.find((candidate) => candidate.id === selectedDayId) ?? itinerary.days[0]!;
   const [titleText, setTitleText] = useState(itinerary.title);
   const [destinationText, setDestinationText] = useState(itinerary.destination);
+  const [destinationPlaceDraft, setDestinationPlaceDraft] = useState<Place | null>(itinerary.destinationPlace ?? null);
   const [startDateText, setStartDateText] = useState(itinerary.startDate);
   const [endDateText, setEndDateText] = useState(itinerary.endDate ?? itinerary.startDate);
   const [budgetText, setBudgetText] = useState(String(itinerary.budgetCny ?? ""));
-  const [companionsText, setCompanionsText] = useState(itinerary.companions.join(", "));
   const [notesText, setNotesText] = useState(itinerary.notes ?? "");
   const [tripDetailsOpen, setTripDetailsOpen] = useState(false);
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
@@ -2286,24 +2483,23 @@ function Workbench({
   const [exportCopyStatus, setExportCopyStatus] = useState("");
   const weatherRequestRef = useRef(new Set<string>());
   const routeRequestRef = useRef(new Set<string>());
-  const companionsKey = itinerary.companions.join("|");
 
   useEffect(() => {
     setTitleText(itinerary.title);
     setDestinationText(itinerary.destination);
+    setDestinationPlaceDraft(itinerary.destinationPlace ?? null);
     setStartDateText(itinerary.startDate);
     setEndDateText(itinerary.endDate ?? itinerary.startDate);
     setBudgetText(String(itinerary.budgetCny ?? ""));
-    setCompanionsText(itinerary.companions.join(", "));
     setNotesText(itinerary.notes ?? "");
   }, [
     itinerary.id,
     itinerary.title,
     itinerary.destination,
+    itinerary.destinationPlace,
     itinerary.startDate,
     itinerary.endDate,
     itinerary.budgetCny,
-    companionsKey,
     itinerary.notes
   ]);
 
@@ -2334,12 +2530,17 @@ function Workbench({
     }
   }, [day.activities, day.id, day.transportLegs, focusTarget, onFocusTargetConsumed]);
 
+  const dayHasWeatherAnchor = day.activities.some(
+    (activity) => hasMapPoint(activity) || Boolean(activity.placeName?.trim() || activity.place?.name?.trim())
+  );
+  const weatherRequestKey = `${day.id}:${itinerary.destination}:${day.date}`;
   useEffect(() => {
     if (!backgroundSyncEnabled) return;
-    if (day.weather || weatherRequestRef.current.has(day.id)) return;
-    weatherRequestRef.current.add(day.id);
+    if (!dayHasWeatherAnchor) return;
+    if (day.weather || weatherRequestRef.current.has(weatherRequestKey)) return;
+    weatherRequestRef.current.add(weatherRequestKey);
     void onUpdateDayWeather(day.id);
-  }, [backgroundSyncEnabled, day.id, day.weather, onUpdateDayWeather]);
+  }, [backgroundSyncEnabled, day.id, day.weather, dayHasWeatherAnchor, onUpdateDayWeather, weatherRequestKey]);
 
   useEffect(() => {
     if (!backgroundSyncEnabled) return;
@@ -2429,16 +2630,27 @@ function Workbench({
   }
 
   function saveTripDetails() {
+    if (!destinationPlaceDraft) return;
     void onUpdateItinerary({
       title: titleText,
       destination: destinationText,
+      destinationPlace: destinationPlaceDraft,
       startDate: startDateText,
       endDate: endDateText,
       budgetCny: Number(budgetText) || undefined,
-      companions: parsePreferenceText(companionsText),
       notes: notesText
     });
     setTripDetailsOpen(false);
+  }
+
+  function updateDestinationText(value: string) {
+    setDestinationText(value);
+    setDestinationPlaceDraft(null);
+  }
+
+  function selectDestinationPlace(place: PlaceSearchItem) {
+    setDestinationText(destinationTextFromSearchPlace(place));
+    setDestinationPlaceDraft(placeFromSearchItem(place));
   }
 
   async function addPlaceToDay(place: PlaceSearchItem): Promise<TravelItinerary | void> {
@@ -2515,11 +2727,11 @@ function Workbench({
               </span>
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5 sm:gap-2" data-testid="workbench-header-actions">
+          <div className="flex shrink-0 self-center flex-wrap items-center justify-end gap-1.5 sm:gap-2" data-testid="workbench-header-actions">
             <Button
               variant="outline"
               size="sm"
-              className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 2xl:hidden"
+              className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 lg:hidden"
               onClick={onOpenAgent}
               aria-label="打开旅行助手"
             >
@@ -2549,7 +2761,7 @@ function Workbench({
           </div>
         </div>
       </header>
-      <div className="min-h-0 overflow-auto px-4 py-4 md:px-6 md:py-5">
+      <div data-testid="workbench-scroll" className="min-h-0 flex-1 overflow-auto px-4 py-4 md:px-6 md:py-5">
         {serviceStatus && <div className="mb-3 text-xs font-semibold text-muted-foreground">{serviceStatus}</div>}
         <MapPanel
           itinerary={itinerary}
@@ -2558,7 +2770,6 @@ function Workbench({
           selectedTransportLegId={selectedTransportLegId}
           routeFocusRequest={mapRouteFocusRequest}
           onAddPlace={addPlaceToDay}
-          onAddBlankActivity={() => void addBlankActivityFromCanvas()}
           onUpdateActivity={onUpdateActivity}
           onSelectDay={onSelectDay}
           onSelectActivity={(activityId) => {
@@ -2569,6 +2780,7 @@ function Workbench({
             setSelectedTransportLegId(legId);
             setSelectedActivityId(null);
           }}
+          onExpandedChange={onMapWorkspaceOpenChange}
           onRouteFocusRequestConsumed={() => setMapRouteFocusRequest(null)}
         />
         <Card className="hidden" data-testid="trip-info-summary">
@@ -2618,24 +2830,24 @@ function Workbench({
                 </Button>
               </div>
               <div className="grid min-h-0 gap-4 overflow-auto bg-[#fbfbf9] p-5">
-                <div className="grid gap-3 lg:grid-cols-3">
+                <div className="grid gap-3 md:grid-cols-2">
                   <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
                     行程名称
                     <Input value={titleText} onChange={(event) => setTitleText(event.target.value)} aria-label="行程名称" />
                   </label>
-                  <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
+                  <div className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
                     目的地
-                    <Input value={destinationText} onChange={(event) => setDestinationText(event.target.value)} aria-label="目的地" />
-                  </label>
-                  <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-                    同行人
-                    <Input
-                      value={companionsText}
-                      onChange={(event) => setCompanionsText(event.target.value)}
-                      aria-label="同行人"
-                      placeholder="例如：家人, 孩子"
+                    <PoiSearchField
+                      value={destinationText}
+                      selectedPlace={destinationPlaceDraft}
+                      city={destinationText}
+                      ariaLabel="目的地"
+                      placeholder="搜索城市、景区或商圈"
+                      selectionHint="请选择一个高德地点，作为地图、天气和地点搜索的目的地锚点。"
+                      onQueryChange={updateDestinationText}
+                      onSelect={selectDestinationPlace}
                     />
-                  </label>
+                  </div>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_180px]">
                   <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
@@ -2671,7 +2883,7 @@ function Workbench({
                 <Button type="button" variant="outline" className="rounded-full" onClick={() => setTripDetailsOpen(false)}>
                   取消
                 </Button>
-                <Button type="button" variant="secondary" className="rounded-full" onClick={saveTripDetails}>
+                <Button type="button" variant="secondary" className="rounded-full" onClick={saveTripDetails} disabled={!destinationPlaceDraft}>
                   应用信息
                 </Button>
               </div>
@@ -2692,22 +2904,6 @@ function Workbench({
           onAddActivity={() => void addBlankActivityFromCanvas()}
         />
         <section className="mt-4 flex flex-col gap-4">
-          {selectedActivity && (
-            <ActivityDetailsPanel
-              activity={selectedActivity}
-              index={selectedActivityIndex}
-              destination={itinerary.destination}
-              dayOptions={itinerary.days}
-              currentDayId={day.id}
-              onChange={(changes) => onUpdateActivity(selectedActivity.id, changes)}
-              onClose={() => setSelectedActivityId(null)}
-              onMoveToDay={(targetDayId) => {
-                if (targetDayId === day.id) return;
-                const targetDay = itinerary.days.find((candidate) => candidate.id === targetDayId);
-                void onMoveActivityToDay(selectedActivity.id, targetDayId, targetDay?.activities.length ?? 0);
-              }}
-            />
-          )}
           {day.activities.length === 0 ? (
             <Card>
               <CardHeader>
@@ -2750,6 +2946,22 @@ function Workbench({
                     }}
                     onDrop={(event) => dropActivity(event, index)}
                   />
+                  {selectedActivityId === activity.id && (
+                    <ActivityDetailsPanel
+                      activity={activity}
+                      index={index}
+                      destination={itinerary.destination}
+                      dayOptions={itinerary.days}
+                      currentDayId={day.id}
+                      onChange={(changes) => onUpdateActivity(activity.id, changes)}
+                      onClose={() => setSelectedActivityId(null)}
+                      onMoveToDay={(targetDayId) => {
+                        if (targetDayId === day.id) return;
+                        const targetDay = itinerary.days.find((candidate) => candidate.id === targetDayId);
+                        void onMoveActivityToDay(activity.id, targetDayId, targetDay?.activities.length ?? 0);
+                      }}
+                    />
+                  )}
                   {next && showTransportLeg && (
                     <TransportLegEditor
                       leg={leg}
@@ -2933,7 +3145,7 @@ function DayContextBar({
     leg: TransportLeg;
   };
   onSelectDay: (dayId: string) => void;
-  onAddDay: () => void;
+  onAddDay: (position?: "after" | "before") => void;
   onAddActivity: () => void;
 }) {
   const routablePairCount = countRoutableAdjacentPairs(day);
@@ -2948,6 +3160,8 @@ function DayContextBar({
     : undefined;
   const selectedActivitySummary = selectedActivity ? activitySummaryView(selectedActivity, selectedActivityIndex) : undefined;
   const selectedActivityTitle = selectedActivitySummary?.displayName;
+  const hasSelectedCanvasContext = Boolean(selectedActivityTitle || selectedRouteName);
+  const useCompactDayPicker = itinerary.days.length > 5;
   const selectedActivityMeta = selectedActivitySummary
     ? [selectedActivitySummary.time, selectedActivitySummary.place, selectedActivitySummary.typeLabel].filter(Boolean)
     : [];
@@ -2967,23 +3181,48 @@ function DayContextBar({
       data-testid="day-context-bar"
       className="sticky top-0 z-30 mt-3 -mx-4 border-y border-border bg-white/95 px-4 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.04)] backdrop-blur md:mt-5 md:-mx-6 md:px-6 md:py-3"
     >
-      <div className="flex items-center justify-between gap-2">
-        <TabsList className="min-w-0 flex-1 overflow-x-auto rounded-full bg-[#f6f6f3] p-1 md:w-auto md:flex-none">
-          {itinerary.days.map((candidate) => (
-            <TabsTrigger
-              key={candidate.id}
-              active={candidate.id === day.id}
-              className="shrink-0"
-              onClick={() => onSelectDay(candidate.id)}
+      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+        <div className="min-w-0">
+          {useCompactDayPicker && (
+            <select
+              className="min-h-10 w-full rounded-full border border-input bg-[#f6f6f3] px-3 text-sm font-black outline-none focus-visible:ring-2 focus-visible:ring-ring sm:hidden"
+              value={day.id}
+              onChange={(event) => onSelectDay(event.target.value)}
+              aria-label="选择日期"
             >
-              {candidate.title}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button type="button" variant="outline" size="sm" className="size-9 rounded-full p-0 md:size-auto md:px-3" onClick={onAddDay} aria-label="添加日期">
+              {itinerary.days.map((candidate) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {candidate.title} · {candidate.date}
+                </option>
+              ))}
+            </select>
+          )}
+          <TabsList
+            className={cn(
+              "min-w-0 max-w-full snap-x overflow-x-auto whitespace-nowrap rounded-full bg-[#f6f6f3] p-1",
+              useCompactDayPicker ? "hidden sm:flex" : "flex"
+            )}
+          >
+            {itinerary.days.map((candidate) => (
+              <TabsTrigger
+                key={candidate.id}
+                active={candidate.id === day.id}
+                className="shrink-0 snap-start"
+                onClick={() => onSelectDay(candidate.id)}
+              >
+                {candidate.title}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </div>
+        <div className="flex min-w-0 flex-wrap items-center justify-start gap-1.5 lg:justify-end">
+          <Button type="button" variant="outline" size="sm" className="size-9 rounded-full p-0 md:size-auto md:px-3" onClick={() => onAddDay("before")} aria-label="前加一天">
             <CalendarPlus />
-            <span className="hidden md:inline">添加日期</span>
+            <span className="hidden md:inline">前加一天</span>
+          </Button>
+          <Button type="button" variant="outline" size="sm" className="size-9 rounded-full p-0 md:size-auto md:px-3" onClick={() => onAddDay("after")} aria-label="后加一天">
+            <CalendarPlus />
+            <span className="hidden md:inline">后加一天</span>
           </Button>
           <Button type="button" variant="secondary" size="sm" className="rounded-full px-3" onClick={onAddActivity} aria-label="添加活动">
             <Plus data-icon="inline-start" />
@@ -2992,8 +3231,20 @@ function DayContextBar({
           </Button>
         </div>
       </div>
-      <div className="mt-2 grid gap-2 lg:mt-3 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.75fr)] lg:items-center">
-        <div className="min-w-0">
+      <div
+        className={cn(
+          "mt-2 gap-2 lg:mt-3",
+          hasSelectedCanvasContext
+            ? "grid lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.75fr)] lg:items-center"
+            : "flex flex-wrap items-center justify-between"
+        )}
+      >
+        <div
+          className={cn(
+            "flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1",
+            !hasSelectedCanvasContext && "flex-1"
+          )}
+        >
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-lg font-black md:text-xl">{day.title}</h3>
             {day.weather && (
@@ -3004,18 +3255,16 @@ function DayContextBar({
               </span>
             )}
           </div>
-          <p className="mt-0.5 line-clamp-1 text-xs font-semibold text-muted-foreground md:mt-1 md:text-sm">
+          <p className="min-w-[220px] flex-1 text-right text-xs font-semibold text-muted-foreground md:text-sm">
             {[daySummary, routeSummary, dayMissingPlaceCount > 0 ? `${dayMissingPlaceCount} 项缺地点` : undefined]
               .filter(Boolean)
               .join(" · ")}
           </p>
         </div>
+        {hasSelectedCanvasContext && (
         <div
           data-testid="selected-canvas-context"
-          className={cn(
-            "min-w-0 rounded-2xl bg-[#f6f6f3] px-3 py-2 text-sm",
-            !selectedActivityTitle && !selectedRouteName && "hidden sm:block"
-          )}
+          className="min-w-0 rounded-2xl bg-[#f6f6f3] px-3 py-2 text-sm"
         >
           {selectedActivityTitle ? (
             <>
@@ -3033,13 +3282,9 @@ function DayContextBar({
                 <p className="mt-1 truncate text-xs font-semibold text-muted-foreground">{selectedRouteMeta.join(" · ")}</p>
               )}
             </>
-          ) : (
-            <>
-              <p className="text-xs font-black text-muted-foreground">当前日期</p>
-              <p className="truncate font-black">{day.activities.length ? "选择活动或路线查看详情" : "先添加当天安排"}</p>
-            </>
-          )}
+          ) : null}
         </div>
+        )}
       </div>
     </section>
   );
@@ -3052,10 +3297,10 @@ function MapPanel({
   selectedTransportLegId,
   routeFocusRequest,
   onAddPlace,
-  onAddBlankActivity,
   onSelectDay,
   onSelectActivity,
   onSelectTransportLeg,
+  onExpandedChange,
   onRouteFocusRequestConsumed,
   onUpdateActivity
 }: {
@@ -3065,10 +3310,10 @@ function MapPanel({
   selectedTransportLegId: string | null;
   routeFocusRequest: MapRouteFocusRequest | null;
   onAddPlace: (place: PlaceSearchItem) => TravelItinerary | void | Promise<TravelItinerary | void>;
-  onAddBlankActivity: () => void;
   onSelectDay: (dayId: string) => void;
   onSelectActivity: (activityId: string) => void;
   onSelectTransportLeg: (legId: string) => void;
+  onExpandedChange?: (open: boolean) => void;
   onRouteFocusRequestConsumed: () => void;
   onUpdateActivity: (activityId: string, changes: Partial<Activity>) => void | Promise<void>;
 }) {
@@ -3077,6 +3322,7 @@ function MapPanel({
   const [mapExpanded, setMapExpanded] = useState(false);
   const [mapSearchText, setMapSearchText] = useState("");
   const [mapSearchResults, setMapSearchResults] = useState<PlaceSearchItem[]>([]);
+  const [mapSearchStatus, setMapSearchStatus] = useState("");
   const [activeMapSearchPlaceId, setActiveMapSearchPlaceId] = useState<string | null>(null);
   const [mapFilterText, setMapFilterText] = useState("");
   const [destinationCenter, setDestinationCenter] = useState<NonNullable<Place["coordinates"]> | null>(null);
@@ -3091,6 +3337,18 @@ function MapPanel({
     previousEndTime: string | undefined;
     nextStartTime: string;
   } | null>(null);
+  const mapActionRefs = useRef({
+    onSelectDay,
+    onSelectActivity,
+    onSelectTransportLeg
+  });
+  useEffect(() => {
+    mapActionRefs.current = {
+      onSelectDay,
+      onSelectActivity,
+      onSelectTransportLeg
+    };
+  }, [onSelectActivity, onSelectDay, onSelectTransportLeg]);
   const tripDaysWithPlaces = itinerary.days.filter((visibleDay) => visibleDay.activities.some(hasMapPoint));
   const hiddenEmptyTripDayCount = Math.max(0, itinerary.days.length - tripDaysWithPlaces.length);
   const visibleDays = mapScope === "trip" && hideEmptyTripDays ? tripDaysWithPlaces : mapScope === "trip" ? itinerary.days : [day];
@@ -3152,8 +3410,8 @@ function MapPanel({
   const mapEmptyTitle = hasActivitiesWithoutMapPoints ? `${unplacedActivityCount} 项安排缺少地点` : "还没有地点";
   const mapEmptyDescription =
     hasActivitiesWithoutMapPoints
-      ? "从搜索结果加入真实地点，或编辑下方安排。"
-      : "搜索地点加入行程，或先创建一项安排。";
+      ? "打开下方活动，在地点里搜索真实地点。"
+      : "先创建一项安排，再在活动里补地点。";
   const showMapEmptyGuidance = points.length === 0 && mapScope !== "trip";
   function routeSegmentMatchesMapFilter(segment: (typeof allRouteSegments)[number], filter: string): boolean {
     const segmentTitle = activityRouteName(segment.fromActivity, segment.toActivity, segment.fromIndex, segment.toIndex);
@@ -3276,6 +3534,7 @@ function MapPanel({
     : routeRiskItems;
   const mapDisplayPoints = mapExpanded || normalizedMapFilter ? filteredPoints : points;
   const coordinatePoints = mapDisplayPoints.filter((item) => item.activity.place?.coordinates);
+  const destinationPlaceCoordinates = itinerary.destinationPlace?.coordinates;
   useEffect(() => {
     if (!routeFocusRequest) return;
     if (day.id !== routeFocusRequest.dayId) {
@@ -3336,38 +3595,34 @@ function MapPanel({
   const activeMapSearchPlaceIdForRender = activeMapSearchPlace?.id ?? null;
   const destinationFallbackCenter = cityFallbackCoordinates(itinerary.destination);
   const destinationCenterFingerprint = destinationCenter ? `${destinationCenter.lng}:${destinationCenter.lat}` : "";
+  const destinationPlaceFingerprint = destinationPlaceCoordinates
+    ? `${destinationPlaceCoordinates.lng}:${destinationPlaceCoordinates.lat}`
+    : "";
 
   useEffect(() => {
     let cancelled = false;
     async function resolveDestinationCenter() {
+      if (destinationPlaceCoordinates) {
+        setDestinationCenter(destinationPlaceCoordinates);
+        return;
+      }
       const destination = itinerary.destination.trim();
       if (!destination) {
         setDestinationCenter(null);
         return;
       }
-      const fallbackCenter = cityFallbackCoordinates(destination);
       const result = await apiGet<{ items: PlaceSearchItem[] }>(
         `/maps/poi?keywords=${encodeURIComponent(destination)}&city=${encodeURIComponent(destination)}`,
-        {
-          items: [
-            {
-              id: `local-destination-${destination}`,
-              name: destination,
-              address: `${destination}市`,
-              city: destination,
-              location: fallbackCenter
-            }
-          ]
-        }
+        { items: [] }
       );
       if (cancelled) return;
-      setDestinationCenter(result.items.find((place) => place.location)?.location ?? fallbackCenter);
+      setDestinationCenter(amapPoiItems(result.items)[0]?.location ?? cityFallbackCoordinates(destination));
     }
     void resolveDestinationCenter();
     return () => {
       cancelled = true;
     };
-  }, [itinerary.destination]);
+  }, [destinationPlaceCoordinates, destinationPlaceFingerprint, itinerary.destination]);
 
   useEffect(() => {
     let disposed = false;
@@ -3393,6 +3648,16 @@ function MapPanel({
         });
         if (AMap.Scale) map.addControl?.(new AMap.Scale());
         if (AMap.ToolBar) map.addControl?.(new AMap.ToolBar({ position: "RB" }));
+        const rootStyles = getComputedStyle(document.documentElement);
+        const tokenColor = (name: string, fallback: string) => {
+          const value = rootStyles.getPropertyValue(name).trim();
+          return value ? `hsl(${value})` : fallback;
+        };
+        const mapColors = {
+          primary: tokenColor("--primary", "#d50024"),
+          foreground: tokenColor("--foreground", "#211f1f"),
+          muted: tokenColor("--muted-foreground", "#66645f")
+        };
         coordinatePoints.forEach((item) => {
           const coordinates = item.activity.place!.coordinates!;
           const label =
@@ -3401,21 +3666,25 @@ function MapPanel({
               : `${item.index + 1}. ${activityDisplayName(item.activity, item.index)}`;
           const marker = new AMap.Marker({
             position: [coordinates.lng, coordinates.lat],
-            label: {
-              content: label,
-              direction: "top"
-            }
+            content: mapMarkerContent(label),
+            anchor: "bottom-center",
+            offset: new AMap.Pixel(0, -6)
           });
-          marker.on?.("click", () => selectOverviewActivity(item.day, item.activity));
+          marker.on?.("click", () => {
+            const actions = mapActionRefs.current;
+            actions.onSelectDay(item.day.id);
+            setMapScope("day");
+            setMapEditPanel("places");
+            actions.onSelectActivity(item.activity.id);
+          });
           map.add(marker);
         });
         searchPreviewPoints.forEach((place, index) => {
           const marker = new AMap.Marker({
             position: [place.location.lng, place.location.lat],
-            label: {
-              content: `候选 ${index + 1}. ${place.name}`,
-              direction: "top"
-            }
+            content: mapMarkerContent(`候选 ${index + 1}. ${place.name}`, "candidate"),
+            anchor: "bottom-center",
+            offset: new AMap.Pixel(0, -6)
           });
           marker.on?.("click", () => setActiveMapSearchPlaceId(place.id));
           map.add(marker);
@@ -3426,17 +3695,17 @@ function MapPanel({
             const selected = selectedTransportLegId === leg.id;
             const polyline = new AMap.Polyline({
               path: leg.polyline!.map((point) => [point.lng, point.lat]),
-              strokeColor: selected ? "#435ee5" : "#111111",
+              strokeColor: selected ? mapColors.primary : mapColors.foreground,
               strokeWeight: selected ? 7 : 5,
-              strokeOpacity: selected ? 0.95 : 0.8
+              strokeOpacity: selected ? 0.95 : 0.72
             });
-            polyline.on?.("click", () => onSelectTransportLeg(leg.id));
+            polyline.on?.("click", () => mapActionRefs.current.onSelectTransportLeg(leg.id));
             map.add(polyline);
         });
         if (selectedMapRouteStep?.polyline.length) {
           const stepPolyline = new AMap.Polyline({
             path: selectedMapRouteStep.polyline.map((point) => [point.lng, point.lat]),
-            strokeColor: "#f97316",
+            strokeColor: mapColors.primary,
             strokeWeight: 9,
             strokeOpacity: 0.98
           });
@@ -3460,32 +3729,26 @@ function MapPanel({
     mapExpanded,
     mapScope,
     searchPreviewFingerprint,
-    selectOverviewActivity,
-    onSelectTransportLeg,
     selectedRouteStepPolylineFingerprint,
     selectedTransportLegId
   ]);
 
   async function searchMapPlaces() {
     const query = mapSearchText.trim();
-    if (!query) return;
-    const fallbackCenter = cityFallbackCoordinates(itinerary.destination);
+    if (!query) {
+      setMapSearchResults([]);
+      setMapSearchStatus("输入关键词后搜索高德地点");
+      return;
+    }
+    setMapSearchStatus("正在搜索高德地点...");
     const result = await apiGet<{ items: PlaceSearchItem[] }>(
       `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(itinerary.destination)}`,
-      {
-        items: [
-          {
-            id: `local-map-${query}`,
-            name: query,
-            address: `${itinerary.destination}市核心区域`,
-            city: itinerary.destination,
-            location: fallbackCenter
-          }
-        ]
-      }
+      { items: [] }
     );
-    setMapSearchResults(result.items);
-    setActiveMapSearchPlaceId(result.items.find((place) => place.location)?.id ?? result.items[0]?.id ?? null);
+    const concreteItems = amapPoiItems(result.items);
+    setMapSearchResults(concreteItems);
+    setActiveMapSearchPlaceId(concreteItems.find((place) => place.location)?.id ?? concreteItems[0]?.id ?? null);
+    setMapSearchStatus(concreteItems.length > 0 ? "" : "没有找到可用的高德地点，请换个关键词。");
   }
 
   async function addMapPlace(place: PlaceSearchItem) {
@@ -3493,6 +3756,7 @@ function MapPanel({
     setLastAddedPlace({ dayTitle: day.title, placeName: place.name });
     setMapSearchText("");
     setMapSearchResults([]);
+    setMapSearchStatus("");
     setActiveMapSearchPlaceId(null);
   }
 
@@ -3502,6 +3766,7 @@ function MapPanel({
     onSelectActivity(selectedMapActivity.id);
     setMapSearchText("");
     setMapSearchResults([]);
+    setMapSearchStatus("");
     setActiveMapSearchPlaceId(null);
   }
 
@@ -3559,8 +3824,10 @@ function MapPanel({
 
   function toggleMapExpanded() {
     setMapExpanded((expanded) => {
-      if (!expanded) setMapEditPanel("places");
-      return !expanded;
+      const nextExpanded = !expanded;
+      if (nextExpanded) setMapEditPanel("places");
+      onExpandedChange?.(nextExpanded);
+      return nextExpanded;
     });
   }
 
@@ -3572,7 +3839,7 @@ function MapPanel({
       className={cn(
         "overflow-hidden rounded-[18px] border border-border bg-white transition-[min-height] md:rounded-[20px]",
         mapExpanded &&
-          "fixed inset-0 z-[70] flex h-dvh min-h-0 flex-col rounded-none border-0 shadow-2xl md:inset-4 md:h-[calc(100vh-2rem)] md:rounded-[20px] md:border"
+          "fixed inset-0 z-[1100] flex h-dvh min-h-0 flex-col rounded-none border-0 shadow-2xl md:inset-4 md:h-[calc(100vh-2rem)] md:rounded-[20px] md:border"
       )}
     >
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-3 py-3 md:gap-4 md:px-4">
@@ -3624,9 +3891,23 @@ function MapPanel({
               全部行程
             </TabsTrigger>
           </TabsList>
-          <Button type="button" variant="outline" size="sm" className="min-h-8 rounded-full px-2.5 text-xs md:min-h-9 md:px-3" onClick={toggleMapExpanded}>
-            {mapExpanded ? "完成地图编辑" : "编辑地图"}
-          </Button>
+          {!mapExpanded && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="min-h-8 rounded-full px-2.5 text-xs md:min-h-9 md:px-3"
+              onClick={toggleMapExpanded}
+            >
+              <Search data-icon="inline-start" />
+              搜索地点
+            </Button>
+          )}
+          {mapExpanded && (
+            <Button type="button" variant="outline" size="sm" className="min-h-8 rounded-full px-2.5 text-xs md:min-h-9 md:px-3" onClick={toggleMapExpanded}>
+              收起地图
+            </Button>
+          )}
         </div>
       </div>
       {mapScope === "trip" && hideEmptyTripDays && hiddenEmptyTripDayCount > 0 && (
@@ -3662,7 +3943,10 @@ function MapPanel({
             <Input
               className="bg-[#fbfbf9]"
               value={mapSearchText}
-              onChange={(event) => setMapSearchText(event.target.value)}
+              onChange={(event) => {
+                setMapSearchText(event.target.value);
+                setMapSearchStatus("");
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
@@ -3677,6 +3961,11 @@ function MapPanel({
               搜索
             </Button>
           </div>
+          {mapSearchStatus && (
+            <p className="rounded-xl bg-[#f6f6f3] px-3 py-2 text-xs font-semibold text-muted-foreground" aria-live="polite">
+              {mapSearchStatus}
+            </p>
+          )}
           {mapSearchResults.length > 0 && (
             <div className="max-h-64 overflow-auto rounded-2xl border border-border bg-white p-2 lg:col-span-2">
               {searchPreviewPoints.length > 0 && (
@@ -3782,12 +4071,6 @@ function MapPanel({
             <p className="font-black">{mapEmptyTitle}</p>
             <p className="mt-1 text-sm text-muted-foreground">{mapEmptyDescription}</p>
           </div>
-          {!hasActivitiesWithoutMapPoints && (
-            <Button type="button" variant="secondary" size="sm" className="shrink-0 rounded-full" onClick={onAddBlankActivity}>
-              <Plus data-icon="inline-start" />
-              添加安排
-            </Button>
-          )}
         </div>
       )}
       {routeRiskItems.length > 0 && !mapExpanded && (
@@ -4847,6 +5130,23 @@ function routePointForFallback(activity: Activity): string {
   return fallback || "待补地点";
 }
 
+function escapeMapHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    };
+    return entities[character] ?? character;
+  });
+}
+
+function mapMarkerContent(label: string, variant: "activity" | "candidate" = "activity"): string {
+  return `<span class="journey-map-pin journey-map-pin--${variant}"><span class="journey-map-pin__label">${escapeMapHtml(label)}</span></span>`;
+}
+
 function downloadTextFile(text: string, filename: string) {
   const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -4870,6 +5170,43 @@ function sanitizeFilename(value: string): string {
   );
 }
 
+function TimePickerField({
+  label,
+  value,
+  onChange,
+  ariaLabel
+}: {
+  label: string;
+  value?: string;
+  onChange: (value: string | undefined) => void;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
+      <div className="flex items-center justify-between gap-2">
+        <span>{label}</span>
+        {value && (
+          <button
+            type="button"
+            className="rounded-full px-2 py-0.5 text-[11px] font-black text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            onClick={() => onChange(undefined)}
+          >
+            清空
+          </button>
+        )}
+      </div>
+      <Input
+        type="time"
+        step={60}
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value || undefined)}
+        aria-label={ariaLabel}
+        className="font-black"
+      />
+    </div>
+  );
+}
+
 function ActivityDetailsPanel({
   activity,
   index,
@@ -4890,43 +5227,18 @@ function ActivityDetailsPanel({
   onMoveToDay: (targetDayId: string) => void | Promise<void>;
 }) {
   const [placeQuery, setPlaceQuery] = useState(activity.placeName ?? "");
-  const [placeResults, setPlaceResults] = useState<PlaceSearchItem[]>([]);
   const titleText = activityDisplayName(activity, index);
 
   useEffect(() => {
     setPlaceQuery(activity.placeName ?? "");
-    setPlaceResults([]);
-  }, [activity.id, activity.placeName]);
-
-  async function searchPlaces() {
-    const result = await apiGet<{
-      items: PlaceSearchItem[];
-    }>(`/maps/poi?keywords=${encodeURIComponent(placeQuery || activity.title)}&city=${encodeURIComponent(activity.place?.city || destination)}`, {
-      items: []
-    });
-    setPlaceResults(result.items);
-  }
+  }, [activity.id]);
 
   function selectPlace(place: PlaceSearchItem) {
     void onChange({
       placeName: place.name,
-      place: {
-        poiId: place.id,
-        name: place.name,
-        address: place.address,
-        city: place.city,
-        district: place.district,
-        type: place.type,
-        typeCode: place.typeCode,
-        phone: place.phone,
-        openingHours: place.openingHours,
-        averageCostCny: place.averageCostCny,
-        photos: place.photos,
-        coordinates: place.location
-      }
+      place: placeFromSearchItem(place)
     });
     setPlaceQuery(place.name);
-    setPlaceResults([]);
   }
 
   return (
@@ -4991,21 +5303,16 @@ function ActivityDetailsPanel({
                 <MapPin className="size-4" />
                 地点
               </div>
-              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
-                <Input
-                  value={placeQuery}
-                  onChange={(event) => {
-                    setPlaceQuery(event.target.value);
-                    onChange({ placeName: event.target.value });
-                  }}
-                  aria-label={`${titleText} 的地点`}
-                  placeholder="输入地点或景点名称"
-                />
-                <Button type="button" variant="secondary" onClick={searchPlaces}>
-                  搜索
-                </Button>
-              </div>
-              {activity.place?.address && <p className="mt-2 text-xs text-muted-foreground">{activity.place.address}</p>}
+              <PoiSearchField
+                value={placeQuery}
+                selectedPlace={placeQuery.trim() === (activity.placeName ?? activity.place?.name ?? "") ? activity.place ?? null : null}
+                city={activity.place?.city || destination}
+                ariaLabel={`${titleText} 的地点`}
+                placeholder="搜索地点或景点名称"
+                selectionHint="必须从高德搜索结果中选择地点，选择后会写入坐标并触发路线、天气更新。"
+                onQueryChange={setPlaceQuery}
+                onSelect={selectPlace}
+              />
               {placeMetaItems(activity.place).length > 0 && (
                 <div className="mt-2 flex flex-wrap gap-1.5 text-xs font-semibold text-muted-foreground">
                   {placeMetaItems(activity.place).map((item) => (
@@ -5015,50 +5322,26 @@ function ActivityDetailsPanel({
                   ))}
                 </div>
               )}
-              {placeResults.length > 0 && (
-                <div className="mt-3 flex max-h-36 flex-col gap-1 overflow-auto rounded-xl border border-border bg-background p-2">
-                  {placeResults.map((place) => (
-                    <button
-                      key={place.id}
-                      type="button"
-                      className="rounded-lg px-2 py-1 text-left text-xs transition-colors hover:bg-secondary"
-                      onClick={() => selectPlace(place)}
-                    >
-                      <strong className="block">{place.name}</strong>
-                      <span className="text-muted-foreground">{place.address}</span>
-                      {placeMetaItems(place).length > 0 && (
-                        <span className="mt-1 block text-muted-foreground">{placeMetaItems(place).join(" · ")}</span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
             </section>
           </div>
 
-          <section className="grid gap-3 rounded-xl bg-white p-3">
-            <div className="flex items-center gap-2 text-sm font-black">
+          <section role="group" aria-label="时间与预算" className="grid gap-3 rounded-xl bg-white p-3 sm:grid-cols-3">
+            <div className="flex items-center gap-2 text-sm font-black sm:col-span-3">
               <Clock3 className="size-4" />
               时间与预算
             </div>
-            <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-              开始时间
-              <Input
-                type="time"
-                value={activity.startTime ?? ""}
-                onChange={(event) => onChange({ startTime: event.target.value })}
-                aria-label={`${titleText} 的开始时间`}
-              />
-            </label>
-            <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-              结束时间
-              <Input
-                type="time"
-                value={activity.endTime ?? ""}
-                onChange={(event) => onChange({ endTime: event.target.value })}
-                aria-label={`${titleText} 的结束时间`}
-              />
-            </label>
+            <TimePickerField
+              label="开始时间"
+              value={activity.startTime}
+              onChange={(value) => onChange({ startTime: value })}
+              ariaLabel={`${titleText} 的开始时间`}
+            />
+            <TimePickerField
+              label="结束时间"
+              value={activity.endTime}
+              onChange={(value) => onChange({ endTime: value })}
+              ariaLabel={`${titleText} 的结束时间`}
+            />
             <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
               预算 / 元
               <Input
@@ -5143,21 +5426,32 @@ function ActivityEditor({
   const typeLabel = activitySummary.typeLabel;
   const blankDraft = activitySummary.blankDraft;
   const titleText = activitySummary.displayName;
+  const visiblePlaceSummary =
+    placeSummary && placeSummary.trim() !== titleText.trim() ? placeSummary : undefined;
+  const statusSummary = blankDraft ? "待补时间" : timeSummary ?? missingSummary;
 
   return (
     <Card
       className={cn(
-        "group overflow-hidden bg-white transition-colors hover:border-foreground/25",
+        "group cursor-pointer overflow-hidden bg-white transition-[background-color,border-color,box-shadow,opacity,transform] duration-150 hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         selected && "border-ring/70 ring-2 ring-ring/20",
-        dragging && "opacity-60",
+        dragging && "scale-[0.995] border-primary/70 bg-primary/5 opacity-95 shadow-lg ring-2 ring-primary/20",
         dropTarget && "border-primary/70 bg-primary/5 ring-2 ring-primary/15"
       )}
       data-testid={`activity-drop-${index}`}
       data-selected={selected ? "true" : "false"}
       data-dragging={dragging ? "true" : "false"}
       data-drop-target={dropTarget ? "true" : "false"}
-      role="listitem"
+      role="button"
+      tabIndex={0}
+      aria-expanded={selected}
       aria-label={`第 ${index + 1} 站：${titleText}`}
+      onClick={onSelect}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onSelect();
+      }}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
@@ -5171,19 +5465,21 @@ function ActivityEditor({
       )}
       <div
         className={cn(
-          "grid grid-cols-[44px_minmax(0,1fr)] gap-3 p-3 md:grid-cols-[44px_minmax(0,1fr)_auto] md:items-center",
-          blankDraft && "grid-cols-[36px_minmax(0,1fr)] gap-2 p-2.5 md:grid-cols-[36px_minmax(0,1fr)_auto]"
+          "grid grid-cols-[44px_minmax(0,1fr)] gap-3 p-3 md:grid-cols-[44px_minmax(150px,0.82fr)_minmax(170px,1fr)_minmax(132px,auto)] md:items-center",
+          blankDraft && "grid-cols-[36px_minmax(0,1fr)] gap-2 p-2.5 md:grid-cols-[36px_minmax(150px,0.82fr)_minmax(170px,1fr)_minmax(112px,auto)]"
         )}
       >
         <button
           type="button"
           draggable
+          onClick={(event) => event.stopPropagation()}
           onDragStart={onDragStart}
           onDragEnd={onDragEnd}
           aria-label={`拖动${titleText}调整顺序`}
           title="拖动排序"
           className={cn(
-            "flex min-h-11 w-11 cursor-grab items-center justify-center rounded-full border border-border bg-[#f6f6f3] text-muted-foreground transition-colors hover:border-foreground/30 hover:bg-secondary active:cursor-grabbing",
+            "flex min-h-11 w-11 cursor-grab items-center justify-center rounded-full border border-border bg-[#f6f6f3] text-muted-foreground transition-all hover:border-foreground/30 hover:bg-secondary active:cursor-grabbing",
+            dragging && "border-primary bg-primary text-primary-foreground shadow-md",
             blankDraft && "min-h-9 w-9"
           )}
         >
@@ -5191,7 +5487,7 @@ function ActivityEditor({
         </button>
 
         <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="flex min-w-0 items-start gap-2">
             <span
               className={cn(
                 "flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-xs font-black text-background",
@@ -5200,24 +5496,42 @@ function ActivityEditor({
             >
               {index + 1}
             </span>
-            <h4 className="min-w-0 flex-1 truncate text-base font-black">{titleText}</h4>
-            {!blankDraft && <Badge className="bg-[#f6f6f3] text-foreground">{typeLabel}</Badge>}
-            {activity.lockedByUser && <Badge>手动锁定</Badge>}
-            {activity.source === "agent" && <Badge className="bg-accent text-accent-foreground">助手建议</Badge>}
+            <div className="min-w-0 flex-1">
+              <h4 className="truncate text-base font-black leading-7">{titleText}</h4>
+              {!blankDraft && (
+                <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                  <Badge className="bg-[#f6f6f3] text-foreground">{typeLabel}</Badge>
+                  {activity.lockedByUser && <Badge>手动锁定</Badge>}
+                  {activity.source === "agent" && <Badge className="bg-accent text-accent-foreground">助手建议</Badge>}
+                </div>
+              )}
+            </div>
           </div>
+        </div>
 
-          {blankDraft ? null : (
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5 text-xs font-semibold text-muted-foreground">
-              {placeSummary && (
+        <div
+          className={cn(
+            "col-span-2 grid min-h-14 gap-1 rounded-xl bg-[#fbfbf9] px-3 py-2 text-xs font-semibold text-muted-foreground md:col-span-1",
+            blankDraft && "min-h-11"
+          )}
+        >
+          {blankDraft ? (
+            <span className="flex items-center gap-1.5">
+              <MapPin className="size-3.5 shrink-0" />
+              地点待补
+            </span>
+          ) : (
+            <>
+              {visiblePlaceSummary && (
                 <span className="flex min-w-0 items-center gap-1.5">
                   <MapPin className="size-3.5 shrink-0" />
-                  <span className="truncate">{placeSummary}</span>
+                  <span className="truncate">{visiblePlaceSummary}</span>
                 </span>
               )}
-              {timeSummary && (
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <Clock3 className="size-3.5 shrink-0" />
-                  <span className="truncate">{timeSummary}</span>
+              {!visiblePlaceSummary && (
+                <span className="flex min-w-0 items-center gap-1.5 text-muted-foreground/80">
+                  <MapPin className="size-3.5 shrink-0" />
+                  <span className="truncate">地点待补</span>
                 </span>
               )}
               {budgetSummary && (
@@ -5226,38 +5540,35 @@ function ActivityEditor({
                   <span className="truncate">{budgetSummary}</span>
                 </span>
               )}
-              {missingSummary && (
-                <span className="flex min-w-0 items-center gap-1.5">
-                  <MapPin className="size-3.5 shrink-0" />
-                  <span className="truncate">{missingSummary}</span>
-                </span>
+              {hasDetails && (
+                <span className="min-w-0 truncate text-muted-foreground">{detailSummary}</span>
               )}
-            </div>
-          )}
-
-          {hasDetails && (
-            <p className="mt-2 truncate text-xs text-muted-foreground">{detailSummary}</p>
+            </>
           )}
         </div>
 
-        <div className="col-span-2 flex flex-wrap items-center gap-1 md:col-span-1 md:justify-end">
-          <Button
-            type="button"
-            variant={selected ? "secondary" : "outline"}
-            size="sm"
-            onClick={onSelect}
-            aria-expanded={selected}
-            aria-label={`编辑${titleText}`}
-          >
-            {selected ? "编辑中" : blankDraft ? "补全" : "编辑"}
-          </Button>
+        <div className="col-span-2 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2 md:col-span-1 md:flex-col md:items-end md:justify-center md:border-t-0 md:pt-0">
+          {statusSummary && (
+            <span
+              className={cn(
+                "inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-full px-3 text-xs font-black",
+                timeSummary ? "bg-[#f6f6f3] text-foreground" : "bg-secondary text-muted-foreground"
+              )}
+            >
+              <Clock3 className="size-3.5 shrink-0" />
+              <span className="truncate">{statusSummary}</span>
+            </span>
+          )}
           {selected && (
             <div className="flex flex-wrap items-center gap-1 rounded-full bg-[#f6f6f3] p-1" aria-label={`${titleText} 的次要操作`}>
               <Button
                 variant="ghost"
                 size="icon"
                 className="size-9"
-                onClick={onMoveUp}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onMoveUp();
+                }}
                 disabled={!canMoveUp}
                 aria-label={`上移${titleText}`}
               >
@@ -5267,13 +5578,25 @@ function ActivityEditor({
                 variant="ghost"
                 size="icon"
                 className="size-9"
-                onClick={onMoveDown}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void onMoveDown();
+                }}
                 disabled={!canMoveDown}
                 aria-label={`下移${titleText}`}
               >
                 <ChevronDown />
               </Button>
-              <Button variant="ghost" size="icon" className="size-9" onClick={onDelete} aria-label={`删除${titleText}`}>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="size-9"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDelete();
+                }}
+                aria-label={`删除${titleText}`}
+              >
                 <Trash2 />
               </Button>
             </div>
@@ -5371,35 +5694,35 @@ function TransportLegEditor({
           selected && "ring-2 ring-ring"
         )}
       >
-        <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-start">
-          <div className="flex min-w-0 items-start gap-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-white text-muted-foreground">
-              <Route className="size-4" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-xs font-bold text-muted-foreground">路线</p>
-              <p className="truncate font-semibold">{routeTitle}</p>
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {provider && <Badge className={cn("min-h-6 px-2.5", provider.className)}>{provider.label}</Badge>}
-                <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-muted-foreground">{metricText}</span>
-                {leg?.summary && <span className="max-w-[260px] truncate text-xs text-muted-foreground">{leg.summary}</span>}
-                {leg?.manualOverride && leg.note && (
-                  <span className="max-w-[260px] truncate text-xs font-semibold text-primary">手动调整：{leg.note}</span>
-                )}
-              </div>
-              {routeFailed && (
-                <p className="mt-2 rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-950">
-                  {leg?.failureReason ?? "路线计算失败，请补全地点或手动填写交通。"}
-                </p>
-              )}
-              {timingConflict && (
-                <p className="mt-2 rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950">
-                  {timingConflict.message}
-                </p>
-              )}
-            </div>
+        <div className="grid gap-3 md:grid-cols-[40px_minmax(170px,0.95fr)_minmax(190px,1fr)] xl:grid-cols-[40px_minmax(170px,0.95fr)_minmax(190px,1fr)_auto] xl:items-center">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-muted-foreground">
+            <Route className="size-4" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-xs font-bold text-muted-foreground">路线</p>
+            <p className="truncate font-black">{routeTitle}</p>
           </div>
-          <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+          <div className="grid min-h-14 min-w-0 gap-1 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-muted-foreground">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              {provider && <Badge className={cn("min-h-6 px-2.5", provider.className)}>{provider.label}</Badge>}
+              <span className="rounded-full bg-[#f6f6f3] px-3 py-1 font-bold text-foreground">{metricText}</span>
+              {leg?.summary && <span className="min-w-0 flex-1 truncate">{leg.summary}</span>}
+            </div>
+            {leg?.manualOverride && leg.note && (
+              <span className="truncate font-semibold text-primary">手动调整：{leg.note}</span>
+            )}
+            {routeFailed && (
+              <span className="rounded-xl bg-red-50 px-3 py-2 font-semibold text-red-950">
+                {leg?.failureReason ?? "路线计算失败，请补全地点或手动填写交通。"}
+              </span>
+            )}
+            {timingConflict && (
+              <span className="rounded-xl bg-amber-50 px-3 py-2 font-semibold text-amber-950">
+                {timingConflict.message}
+              </span>
+            )}
+          </div>
+          <div className="flex flex-wrap items-center gap-2 md:col-span-3 xl:col-span-1 xl:justify-end">
             {leg && (
               <Button
                 type="button"
@@ -5432,7 +5755,7 @@ function TransportLegEditor({
             </Button>
             {showQuickPlanAction && (
               <Button type="button" variant="secondary" size="sm" onClick={() => onSave(mode)}>
-                {leg ? "重新规划" : "规划路线"}
+                {leg ? "重新规划路线" : "规划路线"}
               </Button>
             )}
           </div>
@@ -5538,7 +5861,7 @@ function TransportLegEditor({
                     </select>
                   </label>
                   <Button type="button" variant="outline" className="rounded-full self-end lg:self-auto" onClick={() => onSave(mode)}>
-                    {leg ? "重新规划" : "规划路线"}
+                    {leg ? "重新规划路线" : "规划路线"}
                   </Button>
                   {leg && (
                     <Button
@@ -5777,9 +6100,15 @@ function AgentPanel({
     [displaySkills, importedSkillIds, itinerary]
   );
   const [skillBrowserOpen, setSkillBrowserOpen] = useState(false);
+  const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const container = conversationScrollRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
+  }, [agentProgress.length, agentRunning, messages]);
   return (
     <>
-    <aside className="relative flex h-screen flex-col border-l border-border bg-[#fbfbf9]">
+    <aside className="relative flex h-full min-h-0 flex-col bg-[#fbfbf9]">
       <header className="flex min-h-16 items-center gap-2 border-b border-border px-4">
         <Bot />
         <div className="min-w-0 flex-1">
@@ -5789,87 +6118,72 @@ function AgentPanel({
           </p>
         </div>
         {onClose && (
-          <Button type="button" variant="ghost" size="icon" className="2xl:hidden" onClick={onClose} aria-label="关闭旅行助手">
+          <Button type="button" variant="ghost" size="icon" className="lg:hidden" onClick={onClose} aria-label="关闭旅行助手">
             <X />
           </Button>
         )}
       </header>
-      <div className="border-b border-border bg-white px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="text-xs font-black text-muted-foreground">当前风格</p>
-            <div className="mt-1 flex min-h-7 flex-wrap gap-1.5">
-              {appliedSkills.length > 0 ? (
-                appliedSkills.slice(0, 3).map((skill) => (
-                  <span
-                    key={skill.id}
-                    className="inline-flex min-h-9 items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
-                  >
-                    <span className="max-w-36 truncate">{skillDisplayTitle(skill)}</span>
-                    <button
-                      type="button"
-                      className="inline-flex size-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                      onClick={() => onRemoveSkill(skill.id)}
-                      aria-label={`移出当前风格 ${skillDisplayTitle(skill)}`}
-                    >
-                      <X className="size-4" />
-                    </button>
-                  </span>
-                ))
-              ) : (
-                <span className="rounded-full bg-[#f6f6f3] px-2.5 py-1 text-xs font-semibold text-muted-foreground">
-                  未选择风格
-                </span>
-              )}
-              {appliedSkills.length > 3 && (
-                <span className="inline-flex min-h-7 items-center rounded-full bg-[#f6f6f3] px-2.5 text-xs font-bold">
-                  +{appliedSkills.length - 3}
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="flex shrink-0 flex-col gap-2 sm:flex-row">
+      <div className="border-b border-border bg-white px-4 py-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-xs font-black text-muted-foreground">当前风格</p>
+          <div className="flex shrink-0 items-center gap-1">
             <Button
               type="button"
-              variant="outline"
-              size="sm"
-              className="rounded-full"
+              variant="ghost"
+              size="icon"
+              className="size-8 rounded-full"
               disabled={messages.length === 0 || agentRunning}
               onClick={onCreateSkillFromConversation}
+              aria-label="沉淀风格"
+              title="沉淀风格"
             >
-              <WandSparkles data-icon="inline-start" />
-              沉淀风格
+              <WandSparkles className="size-4" />
             </Button>
             <Button
               type="button"
-              variant={skillBrowserOpen ? "secondary" : "outline"}
-              size="sm"
-              className="rounded-full"
+              variant={skillBrowserOpen ? "secondary" : "ghost"}
+              size="icon"
+              className="size-8 rounded-full"
               onClick={() => setSkillBrowserOpen((open) => !open)}
+              aria-label="浏览风格"
+              title="浏览风格"
             >
-              <Store data-icon="inline-start" />
-              浏览风格
+              <Store className="size-4" />
             </Button>
           </div>
         </div>
-        {appliedSkills.length > 0 && <ImportedSkillInfluenceSummary skills={appliedSkills} itinerary={itinerary} />}
-      </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-4">
-        <div className="flex flex-1 flex-col gap-3">
-          {agentRunning && agentProgress.length > 0 && (
-            <Card className="border-primary/20 bg-white">
-              <CardHeader className="pb-3">
-                <CardTitle>正在处理行程</CardTitle>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                {agentProgress.map((item) => (
-                  <div key={item} className="rounded-2xl bg-secondary px-3 py-2 text-xs">
-                    {item}
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+        <div className="mt-1.5 flex min-h-8 min-w-0 items-center gap-1.5 overflow-hidden">
+          {appliedSkills.length > 0 ? (
+            appliedSkills.slice(0, 1).map((skill) => (
+              <span
+                key={skill.id}
+                className="inline-flex min-h-8 min-w-0 flex-1 items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
+              >
+                <span className="min-w-0 flex-1 truncate">{skillDisplayTitle(skill)}</span>
+                <button
+                  type="button"
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  onClick={() => onRemoveSkill(skill.id)}
+                  aria-label={`移出当前风格 ${skillDisplayTitle(skill)}`}
+                >
+                  <X className="size-3.5" />
+                </button>
+              </span>
+            ))
+          ) : (
+            <span className="min-w-0 truncate rounded-full bg-[#f6f6f3] px-2.5 py-1 text-xs font-semibold text-muted-foreground">
+              未选择风格
+            </span>
           )}
+          {appliedSkills.length > 1 && (
+            <span className="inline-flex min-h-8 shrink-0 items-center rounded-full bg-[#f6f6f3] px-2.5 text-xs font-bold">
+              +{appliedSkills.length - 1}
+            </span>
+          )}
+        </div>
+      </div>
+      <div ref={conversationScrollRef} className="flex min-h-0 flex-1 flex-col overflow-auto p-4" data-testid="agent-message-scroll">
+        <div className="flex min-h-full flex-col justify-end gap-3">
           {messages.length === 0 && !agentRunning && (
             <section className="rounded-2xl border border-border bg-white p-3" aria-label="旅行助手建议">
               <p className="text-sm font-black">试试这些需求</p>
@@ -5890,9 +6204,10 @@ function AgentPanel({
           {messages.map((message, index) => (
             <div
               key={`${message.role}-${index}`}
-              className={`rounded-2xl p-3 text-sm ${
-                message.role === "assistant" ? "bg-white" : "bg-primary text-primary-foreground"
-              }`}
+              className={cn(
+                "max-w-[92%] rounded-2xl p-3 text-sm",
+                message.role === "assistant" ? "self-start bg-white" : "self-end bg-primary text-primary-foreground"
+              )}
             >
               <MessageContent
                 content={message.content}
@@ -5904,6 +6219,20 @@ function AgentPanel({
               />
             </div>
           ))}
+          {agentRunning && agentProgress.length > 0 && (
+            <Card className="max-w-[92%] self-start border-primary/20 bg-white">
+              <CardHeader className="pb-3">
+                <CardTitle>正在处理行程</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2">
+                {agentProgress.map((item) => (
+                  <div key={item} className="rounded-2xl bg-secondary px-3 py-2 text-xs">
+                    {item}
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
         </div>
       </div>
       <footer className="border-t border-border p-4">
@@ -5915,6 +6244,11 @@ function AgentPanel({
           aria-label="对行程的修改需求"
           value={agentInput}
           onChange={(event) => onAgentInputChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            if (!agentRunning) onRunAgent();
+          }}
           placeholder="例如：Day 2 下午安排一个室内景点，节奏轻松一点。"
           disabled={agentRunning}
         />
@@ -6018,6 +6352,159 @@ function AgentPanel({
   );
 }
 
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text))) {
+    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index));
+    const token = match[0];
+    const key = `${keyPrefix}-${match.index}`;
+    if (token.startsWith("**") && token.endsWith("**")) {
+      nodes.push(
+        <strong key={key} className="font-black">
+          {token.slice(2, -2)}
+        </strong>
+      );
+    } else if (token.startsWith("`") && token.endsWith("`")) {
+      nodes.push(
+        <code key={key} className="rounded-md bg-[#f6f6f3] px-1 py-0.5 font-mono text-[0.92em] text-foreground">
+          {token.slice(1, -1)}
+        </code>
+      );
+    } else {
+      const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+      if (linkMatch) {
+        nodes.push(
+          <a
+            key={key}
+            href={linkMatch[2]}
+            target="_blank"
+            rel="noreferrer"
+            className="font-bold underline underline-offset-2"
+          >
+            {linkMatch[1]}
+          </a>
+        );
+      } else {
+        nodes.push(token);
+      }
+    }
+    lastIndex = pattern.lastIndex;
+  }
+  if (lastIndex < text.length) nodes.push(text.slice(lastIndex));
+  return nodes;
+}
+
+function renderMarkdownBlocks(markdown: string): ReactNode[] {
+  const lines = markdown.split("\n");
+  const blocks: ReactNode[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fenceMatch = line.match(/^```(\w+)?\s*$/);
+    if (fenceMatch) {
+      const codeLines: string[] = [];
+      index += 1;
+      while (index < lines.length && !(lines[index] ?? "").match(/^```\s*$/)) {
+        codeLines.push(lines[index] ?? "");
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(
+        <pre key={`code-${index}`} className="overflow-auto rounded-xl bg-[#211922] p-3 text-xs leading-5 text-white">
+          <code>{codeLines.join("\n")}</code>
+        </pre>
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,3})\s+(.+)$/);
+    if (headingMatch) {
+      const marker = headingMatch[1] ?? "#";
+      const headingText = headingMatch[2] ?? "";
+      const level = marker.length;
+      const className =
+        level === 1
+          ? "text-base font-black"
+          : level === 2
+            ? "text-sm font-black"
+            : "text-xs font-black uppercase tracking-normal text-muted-foreground";
+      blocks.push(
+        <p key={`heading-${index}`} className={className}>
+          {renderInlineMarkdown(headingText, `heading-${index}`)}
+        </p>
+      );
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index] ?? "")) {
+        items.push((lines[index] ?? "").replace(/^\s*[-*]\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`ul-${index}`} className="grid gap-1.5">
+          {items.map((item, itemIndex) => (
+            <li key={`${item}-${itemIndex}`} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
+              <span className="mt-2 size-1.5 rounded-full bg-primary" aria-hidden="true" />
+              <span>{renderInlineMarkdown(item, `ul-${index}-${itemIndex}`)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items: string[] = [];
+      while (index < lines.length && /^\s*\d+\.\s+/.test(lines[index] ?? "")) {
+        items.push((lines[index] ?? "").replace(/^\s*\d+\.\s+/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <ol key={`ol-${index}`} className="grid gap-1.5">
+          {items.map((item, itemIndex) => (
+            <li key={`${item}-${itemIndex}`} className="grid grid-cols-[2ch_minmax(0,1fr)] gap-2">
+              <span className="font-black text-muted-foreground">{itemIndex + 1}.</span>
+              <span>{renderInlineMarkdown(item, `ol-${index}-${itemIndex}`)}</span>
+            </li>
+          ))}
+        </ol>
+      );
+      continue;
+    }
+
+    const paragraphLines = [line.trim()];
+    index += 1;
+    while (
+      index < lines.length &&
+      (lines[index] ?? "").trim() &&
+      !/^(#{1,3})\s+/.test(lines[index] ?? "") &&
+      !/^\s*[-*]\s+/.test(lines[index] ?? "") &&
+      !/^\s*\d+\.\s+/.test(lines[index] ?? "") &&
+      !/^```/.test(lines[index] ?? "")
+    ) {
+      paragraphLines.push((lines[index] ?? "").trim());
+      index += 1;
+    }
+    blocks.push(
+      <p key={`p-${index}`} className="leading-6">
+        {renderInlineMarkdown(paragraphLines.join(" "), `p-${index}`)}
+      </p>
+    );
+  }
+  return blocks;
+}
+
 function MessageContent({
   content,
   changeSet,
@@ -6045,10 +6532,8 @@ function MessageContent({
     const styleNames = changeSet?.styleNames ?? [];
     const styleInfluences = changeSet?.styleInfluences ?? [];
     return (
-      <div className="grid gap-3 whitespace-pre-wrap">
-        {bodyLines.map((line, index) => (
-          <p key={`${line}-${index}`}>{line}</p>
-        ))}
+      <div className="grid gap-3">
+        {renderMarkdownBlocks(bodyLines.join("\n"))}
         {diffItems.length > 0 && (
           <section
             role="group"
@@ -6133,17 +6618,8 @@ function MessageContent({
   }
   const optionActions = buildRouteConflictOptionActions(content);
   return (
-    <div className="grid gap-2 whitespace-pre-wrap">
-      {lines.map((line, index) => {
-        if (line === "本轮改动") {
-          return (
-            <p key={`${line}-${index}`} className="mt-2 text-xs font-black text-foreground">
-              本轮改动
-            </p>
-          );
-        }
-        return <p key={`${line}-${index}`}>{line}</p>;
-      })}
+    <div className="grid gap-2">
+      {renderMarkdownBlocks(content)}
       {optionActions.length > 0 && onRunSuggestion && (
         <section
           role="group"
@@ -6296,7 +6772,7 @@ function SkillPlaza({
             <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
               <div className="min-w-0">
                 <h3 className="text-lg font-black">导入旅行风格</h3>
-                <p className="mt-1 text-sm text-muted-foreground">粘贴 SKILL.md 文本，校验通过后保存到风格库。</p>
+                <p className="mt-1 text-sm text-muted-foreground">粘贴旅行风格内容，校验通过后保存到风格库。</p>
               </div>
               <Button
                 type="button"
@@ -6369,7 +6845,7 @@ function SkillPlaza({
           </CardHeader>
         </Card>
       ) : (
-        <div className="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(280px,1fr))]">
+        <div className="grid items-stretch gap-4 [grid-template-columns:repeat(auto-fit,minmax(280px,1fr))]">
           {visibleSkills.map((skill) => (
             <SkillCard
               key={skill.id}
@@ -6421,13 +6897,13 @@ function SkillCard({
   }, [skill.id, skill.tags.join(",")]);
 
   return (
-    <Card className="overflow-hidden bg-white">
+    <Card className="flex h-full min-h-[560px] flex-col overflow-hidden bg-white">
       <SkillCardVisual skill={skill} />
-      <CardHeader>
+      <CardHeader className="shrink-0">
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle>{displayTitle}</CardTitle>
-            <CardDescription>{skillDisplayDescription(skill)}</CardDescription>
+          <div className="min-w-0">
+            <CardTitle className="line-clamp-1">{displayTitle}</CardTitle>
+            <CardDescription className="line-clamp-2">{skillDisplayDescription(skill)}</CardDescription>
           </div>
           <div className="flex shrink-0 flex-col items-end gap-2">
             {imported && <Badge className="bg-accent text-accent-foreground">使用中</Badge>}
@@ -6435,19 +6911,19 @@ function SkillCard({
           </div>
         </div>
       </CardHeader>
-      <CardContent className="flex flex-col gap-3">
-        <div className="flex flex-wrap gap-2">
+      <CardContent className="flex flex-1 flex-col gap-3">
+        <div className="flex min-h-8 flex-wrap content-start gap-2">
           {skill.tags.map((tag) => (
             <Badge key={tag}>{tag}</Badge>
           ))}
         </div>
-        <section className="rounded-2xl bg-[#fbfbf9] p-3" aria-label={`${displayTitle}适配当前行程的原因`}>
+        <section className="min-h-[108px] rounded-2xl bg-[#fbfbf9] p-3" aria-label={`${displayTitle}适配当前行程的原因`}>
           <p className="text-xs font-black text-muted-foreground">适合当前行程</p>
           <ul className="mt-2 grid gap-1.5 text-xs font-semibold text-foreground">
             {fitReasons.map((reason) => (
               <li key={reason} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2">
                 <span className="mt-1.5 size-1.5 rounded-full bg-primary" aria-hidden="true" />
-                <span>{reason}</span>
+                <span className="line-clamp-2">{reason}</span>
               </li>
             ))}
           </ul>
@@ -6485,7 +6961,7 @@ function SkillCard({
             编辑标签
           </Button>
         ) : null}
-        <p className="text-xs font-semibold text-muted-foreground">{skill.favorites} 人收藏</p>
+        <p className="mt-auto text-xs font-semibold text-muted-foreground">{skill.favorites} 人收藏</p>
         <div className="grid gap-2 sm:grid-cols-2">
           <Button
             variant={skill.favorited ? "secondary" : "outline"}
@@ -6866,6 +7342,8 @@ function PreferenceSettings({
 }) {
   const [preferenceText, setPreferenceText] = useState(itinerary.preferences.join(", "));
   const [newPreference, setNewPreference] = useState("");
+  const [customPreferenceType, setCustomPreferenceType] = useState("");
+  const [customPreferenceItems, setCustomPreferenceItems] = useState("");
   const preferences = parsePreferenceText(preferenceText);
   const preferenceSummary = preferences.length ? preferences.join("、") : "暂无行程偏好";
   const preferenceGroups = groupTravelPreferences(preferences);
@@ -6874,6 +7352,8 @@ function PreferenceSettings({
   useEffect(() => {
     setPreferenceText(itinerary.preferences.join(", "));
     setNewPreference("");
+    setCustomPreferenceType("");
+    setCustomPreferenceItems("");
   }, [itinerary.id, itinerary.preferences.join("|")]);
 
   function savePreferences() {
@@ -6897,6 +7377,16 @@ function PreferenceSettings({
     setNewPreference("");
   }
 
+  function addCustomPreferenceType() {
+    const type = customPreferenceType.trim();
+    const items = parsePreferenceText(customPreferenceItems);
+    if (!type || !items.length) return;
+    const next = items.map((item) => `${type}：${item}`);
+    setPreferenceText([...new Set([...preferences, ...next])].join(", "));
+    setCustomPreferenceType("");
+    setCustomPreferenceItems("");
+  }
+
   return (
     <div className="min-h-screen overflow-auto bg-[#fbfbf9] p-6">
       <div className="mb-6">
@@ -6913,7 +7403,7 @@ function PreferenceSettings({
           <CardContent className="grid gap-4">
             <div className="grid gap-3 rounded-2xl bg-[#fbfbf9] p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
               <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-muted-foreground">
-                添加偏好
+                快速添加
                 <Input
                   value={newPreference}
                   onChange={(event) => setNewPreference(event.target.value)}
@@ -6928,9 +7418,41 @@ function PreferenceSettings({
                 />
               </label>
               <Button type="button" variant="secondary" className="self-end rounded-full" onClick={addPreference}>
-                添加偏好
+                添加
               </Button>
             </div>
+            <section className="grid gap-3 rounded-2xl border border-border bg-white p-3" aria-label="添加自定义偏好类型">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-black">自定义偏好类型</p>
+                  <p className="mt-1 text-xs font-semibold text-muted-foreground">用于添加节奏、地点、交通之外的分类，例如亲子、拍照、购物。</p>
+                </div>
+                <Badge className="bg-[#f6f6f3] text-foreground">新类型</Badge>
+              </div>
+              <div className="grid gap-2 md:grid-cols-[180px_minmax(0,1fr)_auto]">
+                <Input
+                  value={customPreferenceType}
+                  onChange={(event) => setCustomPreferenceType(event.target.value)}
+                  aria-label="自定义偏好类型名称"
+                  placeholder="类型，例如亲子"
+                />
+                <Input
+                  value={customPreferenceItems}
+                  onChange={(event) => setCustomPreferenceItems(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addCustomPreferenceType();
+                    }
+                  }}
+                  aria-label="自定义偏好内容"
+                  placeholder="偏好，例如儿童友好餐厅、少排队"
+                />
+                <Button type="button" variant="secondary" className="rounded-full" onClick={addCustomPreferenceType}>
+                  添加类型
+                </Button>
+              </div>
+            </section>
             <div className="grid gap-3 md:grid-cols-2" aria-label="结构化行程偏好">
               {preferenceGroups.map((group) => (
                 <section key={group.id} className="rounded-2xl border border-border bg-white p-3">
@@ -7213,7 +7735,7 @@ function EvaluationPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <CardTitle>子 Agent 编排</CardTitle>
-                <CardDescription>主 Agent 将任务派发给风格、地点、天气、交通、规划和校验 Agent。</CardDescription>
+                <CardDescription>主 Agent 将任务派发给风格、地点、交通、规划和校验 Agent；天气由画布后台服务自动补全。</CardDescription>
               </div>
               <Badge className="bg-white text-foreground">{latestTraces.length} 条 trace</Badge>
             </div>
@@ -7293,7 +7815,6 @@ function summarizeAgentTraces(traces: AgentTraceEvent[]): Array<{ name: AgentTra
     "StyleAgent",
     "PlannerAgent",
     "AttractionAgent",
-    "WeatherAgent",
     "TransportAgent",
     "CriticAgent"
   ];

@@ -26,6 +26,12 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   min-width: 320px;
@@ -41,6 +47,56 @@ input,
 textarea,
 select {
   font: inherit;
+}
+
+.journey-map-pin {
+  position: relative;
+  display: inline-flex;
+  max-width: 190px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 9999px;
+  background: hsl(var(--background) / 0.96);
+  color: hsl(var(--foreground));
+  box-shadow: 0 12px 26px rgb(0 0 0 / 0.18);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.journey-map-pin::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 9999px;
+  background: hsl(var(--primary));
+}
+
+.journey-map-pin::after {
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  border-right: 1px solid hsl(var(--border));
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--background) / 0.96);
+  content: "";
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.journey-map-pin--candidate::before {
+  background: hsl(var(--foreground));
+}
+
+.journey-map-pin__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .photo-tile {

@@ -121,6 +121,7 @@ export const TravelItinerarySchema = z.object({
   id: z.string(),
   title: z.string(),
   destination: z.string(),
+  destinationPlace: PlaceSchema.optional(),
   startDate: z.string(),
   endDate: z.string().optional(),
   companions: z.array(z.string()).default([]),
@@ -143,6 +144,7 @@ export type ActivityDraft = Omit<Activity, "id" | "tags" | "source" | "lockedByU
 export type CreateItineraryInput = {
   title: string;
   destination: string;
+  destinationPlace?: Place;
   startDate: string;
   endDate?: string;
   dayCount?: number;

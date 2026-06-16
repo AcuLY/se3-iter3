@@ -286,6 +286,43 @@ describe("travel workbench API", () => {
     expect(reloaded.body.itinerary.importedSkillIds).toEqual(["skill-slow-citywalk"]);
   });
 
+  it("can add an empty day before the current first day without shifting existing activities", async () => {
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+
+    const created = await request(app)
+      .post("/api/itineraries")
+      .send({
+        title: "苏州验收",
+        destination: "苏州",
+        startDate: "2026-07-01",
+        endDate: "2026-07-02"
+      })
+      .expect(201);
+    const itineraryId = created.body.itinerary.id;
+    const firstDayId = created.body.itinerary.days[0].id;
+
+    await request(app)
+      .post(`/api/itineraries/${itineraryId}/days/${firstDayId}/activities`)
+      .send({
+        type: "attraction",
+        title: "拙政园",
+        placeName: "拙政园"
+      })
+      .expect(201);
+
+    const prepended = await request(app)
+      .post(`/api/itineraries/${itineraryId}/days`)
+      .send({ position: "before" })
+      .expect(201);
+
+    expect(prepended.body.itinerary.startDate).toBe("2026-06-30");
+    expect(prepended.body.itinerary.days.map((day: { title: string }) => day.title)).toEqual(["Day 1", "Day 2", "Day 3"]);
+    expect(prepended.body.itinerary.days.map((day: { date: string }) => day.date)).toEqual(["2026-06-30", "2026-07-01", "2026-07-02"]);
+    expect(prepended.body.itinerary.days[0].activities).toHaveLength(0);
+    expect(prepended.body.itinerary.days[1].activities[0].title).toBe("拙政园");
+  });
+
   it("imports uploaded Skill markdown into the current itinerary and records usage", async () => {
     const db = createInMemoryDatabase();
     const app = createApp({ db });
