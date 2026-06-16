@@ -2,19 +2,28 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createSeedItinerary, createSeedSkills, evaluationDataset } from "@journey/shared";
-import type { AgentSession, AgentTraceEvent, EvaluationCase, TravelItinerary, TravelSkill } from "@journey/shared";
+import type {
+  AgentSession,
+  AgentTraceEvent,
+  EvaluationCase,
+  SavedMemory,
+  SkillCreatorSession,
+  TravelItinerary,
+  TravelSkill
+} from "@journey/shared";
 
-type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases";
+type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases" | "skill_creator_sessions" | "memories";
 
 export class JourneyDatabase {
   private readonly db: DatabaseSync;
 
-  constructor(filename: string) {
+  constructor(filename: string, options: { seed?: boolean } = {}) {
     if (filename !== ":memory:") {
       mkdirSync(dirname(resolve(filename)), { recursive: true });
     }
     this.db = new DatabaseSync(filename);
     this.initialize();
+    if (options.seed) this.seedIfEmpty();
   }
 
   listItineraries(): TravelItinerary[] {
@@ -62,6 +71,36 @@ export class JourneyDatabase {
   saveSession(session: AgentSession): AgentSession {
     this.saveJson("sessions", session.id, session);
     return session;
+  }
+
+  listSkillCreatorSessions(): SkillCreatorSession[] {
+    return this.listJson<SkillCreatorSession>("skill_creator_sessions");
+  }
+
+  getSkillCreatorSession(id: string): SkillCreatorSession | undefined {
+    return this.getJson<SkillCreatorSession>("skill_creator_sessions", id);
+  }
+
+  saveSkillCreatorSession(session: SkillCreatorSession): SkillCreatorSession {
+    this.saveJson("skill_creator_sessions", session.id, session);
+    return session;
+  }
+
+  listMemories(): SavedMemory[] {
+    return this.listJson<SavedMemory>("memories");
+  }
+
+  getMemory(id: string): SavedMemory | undefined {
+    return this.getJson<SavedMemory>("memories", id);
+  }
+
+  saveMemory(memory: SavedMemory): SavedMemory {
+    this.saveJson("memories", memory.id, memory);
+    return memory;
+  }
+
+  deleteMemory(id: string): boolean {
+    return this.deleteJson("memories", id) > 0;
   }
 
   deleteSessionsForItinerary(itineraryId: string): number {
@@ -119,11 +158,20 @@ export class JourneyDatabase {
         json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS skill_creator_sessions (
+        id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS memories (
+        id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
-    this.seedIfEmpty();
   }
 
-  private seedIfEmpty(): void {
+  seedIfEmpty(): void {
     if (this.count("itineraries") === 0) {
       this.saveItinerary(createSeedItinerary());
     }
@@ -169,7 +217,7 @@ export class JourneyDatabase {
 }
 
 export function createInMemoryDatabase(): JourneyDatabase {
-  return new JourneyDatabase(":memory:");
+  return new JourneyDatabase(":memory:", { seed: true });
 }
 
 export function createFileDatabase(filename = process.env.DATABASE_PATH ?? "./data/journey.sqlite"): JourneyDatabase {

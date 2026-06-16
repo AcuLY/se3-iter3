@@ -167,7 +167,7 @@ export class ItineraryService {
 type ItineraryDetailChanges = Partial<
   Pick<
     TravelItinerary,
-    "title" | "destination" | "destinationPlace" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions"
+    "title" | "destination" | "destinationPlace" | "startDate" | "endDate" | "budgetCny" | "notes" | "companions"
   >
 >;
 
@@ -185,7 +185,6 @@ function cleanItineraryChanges(changes: ItineraryDetailChanges): ItineraryDetail
   if (typeof changes.endDate === "string") cleaned.endDate = changes.endDate;
   if (typeof changes.budgetCny === "number") cleaned.budgetCny = changes.budgetCny;
   if (typeof changes.notes === "string") cleaned.notes = changes.notes.trim();
-  if (Array.isArray(changes.preferences)) cleaned.preferences = cleanList(changes.preferences);
   if (Array.isArray(changes.companions)) cleaned.companions = cleanList(changes.companions);
   return cleaned;
 }

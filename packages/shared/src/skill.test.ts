@@ -174,8 +174,7 @@ name: loose-notes
       title: "厦门松弛海边",
       destination: "厦门",
       startDate: "2026-11-01",
-      dayCount: 1,
-      preferences: ["海边", "慢节奏"]
+      dayCount: 1
     });
     itinerary = addActivity(itinerary, itinerary.days[0]!.id, {
       type: "attraction",

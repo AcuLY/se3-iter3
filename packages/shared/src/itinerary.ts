@@ -7,6 +7,7 @@ import type {
   ItineraryPatch,
   PatchConflict,
   PatchResult,
+  Place,
   TransportLeg,
   TravelItinerary,
   WeatherSummary
@@ -29,6 +30,28 @@ export function addDays(date: string, offset: number): string {
   return next.toISOString().slice(0, 10);
 }
 
+function inferActivityTypeFromPlace(place?: Pick<Place, "type" | "name" | "address">): Activity["type"] {
+  const text = [place?.type, place?.name, place?.address].filter(Boolean).join(" ");
+  if (/餐饮|咖啡|茶|美食|饭店|餐厅|小吃|甜品/.test(text)) return "food";
+  if (/酒店|住宿|民宿|宾馆|客栈/.test(text)) return "lodging";
+  if (/交通|机场|车站|地铁|公交|码头|火车|高铁/.test(text)) return "transport";
+  if (/公园|景区|景点|风景|博物馆|寺|馆|文化|展览|古镇|商场|购物|银泰|百货|店/.test(text)) return "attraction";
+  return "attraction";
+}
+
+function createFirstDestinationActivity(input: CreateItineraryInput): Activity | null {
+  const firstDestination = input.firstDestination?.trim() || input.firstDestinationPlace?.name.trim();
+  if (!firstDestination) return null;
+  const placeName = input.firstDestinationPlace?.name.trim() || firstDestination;
+  return normalizeActivity({
+    type: inferActivityTypeFromPlace(input.firstDestinationPlace),
+    title: firstDestination,
+    placeName,
+    place: input.firstDestinationPlace,
+    tags: ["第一目的地"]
+  });
+}
+
 export function createDraftItinerary(input: CreateItineraryInput): TravelItinerary {
   const dayCount = Math.max(1, input.dayCount ?? countInclusiveDays(input.startDate, input.endDate ?? input.startDate));
   const days: ItineraryDay[] = Array.from({ length: dayCount }, (_, index) => ({
@@ -38,6 +61,10 @@ export function createDraftItinerary(input: CreateItineraryInput): TravelItinera
     activities: [],
     transportLegs: []
   }));
+  const firstDestinationActivity = createFirstDestinationActivity(input);
+  if (firstDestinationActivity) {
+    days[0]?.activities.push(firstDestinationActivity);
+  }
 
   return {
     id: createId("trip"),
@@ -569,8 +596,6 @@ export function exportItineraryMarkdown(itinerary: TravelItinerary): string {
   ];
 
   if (itinerary.budgetCny !== undefined) lines.push(`总预算：${itinerary.budgetCny} 元`);
-  if (itinerary.companions.length) lines.push(`同行人：${itinerary.companions.join("、")}`);
-  if (itinerary.preferences.length) lines.push(`偏好：${itinerary.preferences.join("、")}`);
   if (itinerary.notes) lines.push(`备注：${itinerary.notes}`);
   lines.push("");
   lines.push("## 行程总览");
@@ -815,7 +840,6 @@ function formatTransportLegLine(leg: TransportLeg): string {
 function formatTransportProviderForExport(leg: TransportLeg): string | undefined {
   if (leg.manualOverride) return undefined;
   if (leg.provider === "amap") return "高德路线";
-  if (leg.provider === "mock") return "本地估算";
   return "手动路线";
 }
 
@@ -835,7 +859,6 @@ function formatRouteSteps(leg: TransportLeg): string | undefined {
 function inferRouteStatus(leg: TransportLegDraft): TransportLeg["routeStatus"] {
   if (leg.manualOverride) return "manual";
   if (leg.provider === "amap") return "planned";
-  if (leg.provider === "mock") return "estimated";
   return "manual";
 }
 

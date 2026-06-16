@@ -4,10 +4,9 @@ import {
   addDayBefore,
   aggregateEvaluation,
   appendSkillVersion,
+  buildSkillMarkdown,
   buildExtractedSkillDraftTitle,
   createDraftItinerary,
-  createSeedItinerary,
-  createSeedSkills,
   detectTransportTimingConflict,
   diffItineraries,
   evaluationDataset,
@@ -22,9 +21,9 @@ import {
   setDayWeather,
   setTransportLeg,
   summarizePlanningChecklist,
-  summarizeItineraryAsSkill,
   updateActivity,
   validateSkillMarkdown,
+  type AgentRunEvent,
   type AgentSession,
   type AgentTraceEvent,
   type Activity,
@@ -37,7 +36,11 @@ import {
   type Place,
   type RouteStep,
   type RouteSummary,
+  type SavedMemory,
   type SkillRecommendation,
+  type SkillCreatorOption,
+  type SkillCreatorSession,
+  type SkillCreatorTurn,
   type SkillValidationResult,
   type TransportLeg,
   type TravelItinerary,
@@ -49,6 +52,7 @@ import {
   Archive,
   Bot,
   CalendarPlus,
+  Check,
   ChevronDown,
   ChevronUp,
   CloudSun,
@@ -75,8 +79,8 @@ import {
   WandSparkles,
   X
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
-import { ApiStreamEventError, apiDelete, apiEventStream, apiGet, apiPost, apiPatch, apiText } from "@/api/client";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type DragEvent, type FormEvent, type ReactNode } from "react";
+import { ApiRequestError, ApiStreamEventError, apiDelete, apiEventStream, apiGet, apiPost, apiPostStrict, apiPatch, apiText } from "@/api/client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -86,7 +90,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-type Page = "home" | "workbench" | "skills" | "creator" | "settings" | "evaluation";
+type Page = "home" | "workbench" | "result" | "skills" | "creator" | "settings" | "evaluation";
 type MapRouteFocusRequest = { dayId: string; legId: string; nonce: number };
 const LAST_ITINERARY_ID_KEY = "journey:last-itinerary-id";
 const ASSISTANT_PROMPT_SUGGESTIONS = [
@@ -94,16 +98,42 @@ const ASSISTANT_PROMPT_SUGGESTIONS = [
   "把今天预算压到 800 元以内，尽量少跨区",
   "检查路线是否会晚到，并给我一个调整方案"
 ];
+const AGENT_WAITING_STATUS = "等待新的需求";
+const EMPTY_ITINERARY = createDraftItinerary({
+  title: "",
+  destination: "",
+  startDate: new Date().toISOString().slice(0, 10),
+  endDate: new Date().toISOString().slice(0, 10),
+  companions: [],
+  preferences: []
+});
 type CreateTripFormInput = {
   title: string;
   destination: string;
   destinationPlace?: Place;
+  firstDestination?: string;
+  firstDestinationPlace?: Place;
   startDate: string;
   endDate: string;
   budgetCny?: number;
   companions?: string[];
-  preferences?: string[];
   notes?: string;
+};
+type OvernightStartAnchor = {
+  day: ItineraryDay;
+  activity: Activity;
+  index: number;
+};
+type DayRoutePair = {
+  day: ItineraryDay;
+  fromActivity: Activity;
+  toActivity: Activity;
+  fromIndex: number;
+  toIndex: number;
+  fromDayId: string;
+  toDayId: string;
+  leg?: TransportLeg;
+  overnightStart: boolean;
 };
 type AgentChangeTarget = {
   label: string;
@@ -124,10 +154,34 @@ type AgentChangeSet = {
   targets: Array<AgentChangeTarget | undefined>;
   undone?: boolean;
 };
-type ChatMessage = { role: "user" | "assistant"; content: string; changeSet?: AgentChangeSet };
+type AgentActivityKind = "thought" | "output" | "tool_call" | "tool_result" | "state_patch" | "handoff" | "final_signal" | "error";
+type AgentActivityStatus = "running" | "completed" | "failed";
+type AgentActivityItem = {
+  id: string;
+  kind: AgentActivityKind;
+  title: string;
+  detail?: string;
+  agent?: AgentTraceEvent["agent"];
+  traceType?: AgentTraceEvent["type"];
+  status: AgentActivityStatus;
+  technical?: AgentRunEvent["technical"];
+};
+type AgentRunLog = {
+  id: string;
+  status: "running" | "completed" | "failed" | "stopped";
+  summary: string;
+  expanded: boolean;
+  items: AgentActivityItem[];
+};
+type ChatMessage = { role: "user" | "assistant"; content: string; changeSet?: AgentChangeSet; runLog?: AgentRunLog };
 type AssistantAction = { label: string; requestText: string };
 type SkillFilter = "recommended" | "all" | "favorites" | "drafts";
 type SkillCreatorSourceMode = "text" | "itinerary" | "conversation";
+type SkillCreatorStartResponse = {
+  session: SkillCreatorSession;
+  turn: SkillCreatorTurn;
+};
+type SkillCreatorReplyResponse = SkillCreatorStartResponse;
 type SkillContentChanges = Partial<
   Pick<TravelSkill, "displayName" | "description" | "body" | "tags" | "rules" | "forbidden" | "status">
 >;
@@ -136,12 +190,8 @@ type AgentRunResponse = {
   message: { role: "assistant"; content: string };
   diff: string[];
   session?: AgentSession;
-};
-type AgentMemory = {
-  preferenceSummary?: string;
-  contextSummary?: string;
-  sessionCount: number;
-  latestUpdatedAt?: string;
+  traces?: AgentTraceEvent[];
+  events?: AgentRunEvent[];
 };
 type ActivitySummaryView = {
   displayName: string;
@@ -189,6 +239,7 @@ const routeModeOptions: Array<[MapRouteMode, string]> = [
 const pageRoutes: Record<Page, string> = {
   home: "/",
   workbench: "/workbench",
+  result: "/result",
   skills: "/skills",
   creator: "/creator",
   settings: "/settings",
@@ -356,21 +407,24 @@ function cityFallbackCoordinates(city: string): NonNullable<Place["coordinates"]
 
 function normalizeItineraryForClient(itinerary: TravelItinerary): TravelItinerary {
   const title = normalizeTravelerFacingTitle(itinerary);
-  const days = itinerary.days.map((day) => {
-    const activities = day.activities.map((activity) => normalizeLegacyPlaceholderActivity(activity, itinerary.destination));
+  const normalizedItinerary = {
+    ...itinerary,
+    title,
+    days: itinerary.days.map((day) => ({
+      ...day,
+      activities: day.activities.map((activity) => normalizeLegacyPlaceholderActivity(activity, itinerary.destination))
+    }))
+  };
+  const days = normalizedItinerary.days.map((day) => {
     const routeablePairs = new Set(
-      activities.flatMap((activity, index) => {
-        const next = activities[index + 1];
-        return next && canRouteActivityPair(activity, next) ? [`${activity.id}:${next.id}`] : [];
-      })
+      getRoutePairsForDay(normalizedItinerary, day).map((pair) => `${pair.fromActivity.id}:${pair.toActivity.id}`)
     );
     return {
       ...day,
-      activities,
       transportLegs: (day.transportLegs ?? []).filter((leg) => routeablePairs.has(`${leg.fromActivityId}:${leg.toActivityId}`))
     };
   });
-  return { ...itinerary, title, days };
+  return { ...normalizedItinerary, days };
 }
 
 function normalizeTravelerFacingTitle(itinerary: TravelItinerary): string {
@@ -423,21 +477,23 @@ function normalizeLegacyPlaceholderActivity(activity: Activity, destination: str
 
 export default function App() {
   const [page, setPageState] = useState<Page>(() => readPageFromLocation());
-  const [itinerary, setItinerary] = useState<TravelItinerary>(() => createSeedItinerary());
+  const [itinerary, setItinerary] = useState<TravelItinerary>(() => EMPTY_ITINERARY);
   const [itineraries, setItineraries] = useState<TravelItinerary[]>(() => [itinerary]);
-  const [skills, setSkills] = useState<TravelSkill[]>(() => createSeedSkills());
+  const [skills, setSkills] = useState<TravelSkill[]>([]);
+  const [savedMemories, setSavedMemories] = useState<SavedMemory[]>([]);
   const [selectedDayId, setSelectedDayId] = useState(() => itinerary.days[0]?.id ?? "");
   const [importedSkillIds, setImportedSkillIds] = useState<string[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [agentInput, setAgentInput] = useState("");
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentProgress, setAgentProgress] = useState<string[]>([]);
+  const [agentRunLog, setAgentRunLog] = useState<AgentRunLog | null>(null);
   const agentAbortRef = useRef<AbortController | null>(null);
+  const agentRunLogRef = useRef<AgentRunLog | null>(null);
   const itineraryRef = useRef<TravelItinerary>(itinerary);
   const [exportText, setExportText] = useState("");
   const [serviceStatus, setServiceStatus] = useState("");
   const [saveStatus, setSaveStatus] = useState("已保存");
-  const [agentMemory, setAgentMemory] = useState<AgentMemory | null>(null);
   const [agentDrawerOpen, setAgentDrawerOpen] = useState(false);
   const [canvasFocusTarget, setCanvasFocusTarget] = useState<AgentChangeTarget | null>(null);
   const [skillFilter, setSkillFilter] = useState<SkillFilter>("recommended");
@@ -448,6 +504,17 @@ export default function App() {
   );
   const [newTripDialogOpen, setNewTripDialogOpen] = useState(false);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
+  const savedMemoryKeywords = useMemo(() => deriveSavedMemoryKeywords(savedMemories, skills), [savedMemories, skills]);
+
+  async function loadSavedMemories() {
+    try {
+      const result = await apiGet<{ items: SavedMemory[] }>("/memories");
+      return sortSavedMemoriesByUpdatedAt(result.items);
+    } catch (error) {
+      if (error instanceof Error && "status" in error && (error as { status?: unknown }).status === 404) return [];
+      throw error;
+    }
+  }
 
   function setPage(nextPage: Page) {
     setPageState(nextPage);
@@ -473,32 +540,44 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     async function loadInitialData() {
-      const [itineraryResult, skillResult] = await Promise.all([
-        apiGet<{ items: TravelItinerary[] }>("/itineraries", { items: [createSeedItinerary()] }),
-        apiGet<{ items: TravelSkill[] }>("/skills", { items: createSeedSkills() })
-      ]);
-      if (cancelled) return;
-      const loadedItems = sortItinerariesByRecency(itineraryResult.items.map(normalizeItineraryForClient));
-      setItineraries(loadedItems.length ? loadedItems : [itinerary]);
-      const lastItineraryId = readLastItineraryId();
-      const loaded = loadedItems.find((item) => item.id === lastItineraryId) ?? loadedItems[0];
-      if (loaded) {
-        setItinerary(loaded);
-        itineraryRef.current = loaded;
-        setSelectedDayId(loaded.days[0]?.id ?? "");
-        setImportedSkillIds(loaded.importedSkillIds ?? []);
-        markSaved(loaded.updatedAt);
-        rememberLastItineraryId(loaded.id);
-        const sessionResult = await apiGet<{ items: AgentSession[] }>(
-          `/agent/sessions?itineraryId=${encodeURIComponent(loaded.id)}`,
-          { items: [] }
-        );
-        if (!cancelled) setAgentMemory(buildAgentMemory(sessionResult.items));
+      try {
+        const [itineraryResult, skillResult, memoryResult] = await Promise.all([
+          apiGet<{ items: TravelItinerary[] }>("/itineraries"),
+          apiGet<{ items: TravelSkill[] }>("/skills"),
+          loadSavedMemories()
+        ]);
+        if (cancelled) return;
+        const loadedItems = sortItinerariesByRecency(itineraryResult.items.map(normalizeItineraryForClient));
+        setItineraries(loadedItems);
+        setSkills(skillResult.items);
+        setSavedMemories(memoryResult);
+        const lastItineraryId = readLastItineraryId();
+        const loaded = loadedItems.find((item) => item.id === lastItineraryId) ?? loadedItems[0];
+        if (loaded) {
+          setItinerary(loaded);
+          itineraryRef.current = loaded;
+          setSelectedDayId(loaded.days[0]?.id ?? "");
+          setImportedSkillIds(loaded.importedSkillIds ?? []);
+          markSaved(loaded.updatedAt);
+          rememberLastItineraryId(loaded.id);
+        } else {
+          setItinerary(EMPTY_ITINERARY);
+          itineraryRef.current = EMPTY_ITINERARY;
+          setSelectedDayId("");
+          setImportedSkillIds([]);
+        }
+        if (!cancelled) {
+          setServiceStatus("");
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setServiceStatus(readApiRequestErrorMessage(error, "服务加载失败，请确认 API 后端已启动。"));
+        setItineraries([]);
+        setSkills([]);
+        setSavedMemories([]);
+      } finally {
+        if (!cancelled) setInitialDataLoaded(true);
       }
-      if (cancelled) return;
-      setSkills(skillResult.items);
-      setServiceStatus("");
-      setInitialDataLoaded(true);
     }
     void loadInitialData();
     return () => {
@@ -516,16 +595,16 @@ export default function App() {
     () =>
       recommendSkills(skills, {
         destination: itinerary.destination,
-        companions: itinerary.companions,
-        preferences: itinerary.preferences,
+        companions: [],
+        preferences: savedMemoryKeywords,
         currentText: `${itinerary.title} ${itinerary.days.flatMap((day) => day.activities.map((activity) => activity.title)).join(" ")}`,
         importedSkillIds
       }),
-    [importedSkillIds, itinerary, skills]
+    [importedSkillIds, itinerary, savedMemoryKeywords, skills]
   );
-  const showAgentPanel = page === "workbench";
+  const showAgentPanel = page === "workbench" && itineraries.length > 0;
   const shellGridClass = showAgentPanel
-    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden lg:grid-cols-[72px_minmax(0,1fr)] 2xl:grid-cols-[280px_minmax(0,1fr)_380px]"
+    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden min-[769px]:grid-cols-[minmax(0,1fr)_clamp(440px,46vw,500px)] lg:grid-cols-[72px_minmax(0,1fr)_clamp(440px,38vw,540px)] 2xl:grid-cols-[280px_minmax(0,1fr)_clamp(520px,30vw,620px)]"
     : "grid min-h-screen grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]";
 
   async function addManualActivity(activity?: ActivityDraft) {
@@ -538,16 +617,16 @@ export default function App() {
         tags: ["手动"]
       };
     markSaving();
-    const fallback = {
-      itinerary: addActivity(itinerary, selectedDay.id, draft)
-    };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/days/${selectedDay.id}/activities`,
-      draft,
-      fallback
-    );
-    const normalized = commitSavedItinerary(result.itinerary);
-    return normalized;
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days/${selectedDay.id}/activities`, draft);
+      const normalized = commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+      return normalized;
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "新增活动失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+      return undefined;
+    }
   }
 
   async function selectItinerary(itineraryId: string) {
@@ -568,25 +647,21 @@ export default function App() {
     setMessages([]);
     markSaved(normalized.updatedAt);
     rememberLastItineraryId(normalized.id);
-    const sessionResult = await apiGet<{ items: AgentSession[] }>(
-      `/agent/sessions?itineraryId=${encodeURIComponent(normalized.id)}`,
-      { items: [] }
-    );
-    setAgentMemory(buildAgentMemory(sessionResult.items));
   }
 
   async function archiveItinerary(itineraryId: string) {
     const target = itineraries.find((item) => item.id === itineraryId);
     if (!target || itineraries.length <= 1) return;
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itineraryId}/archive`,
-      {},
-      { itinerary: { ...target, archivedAt: new Date().toISOString() } }
-    );
-    const remaining = sortItinerariesByRecency(itineraries.filter((item) => item.id !== result.itinerary.id));
-    setItineraries(remaining);
-    if (itinerary.id === result.itinerary.id && remaining[0]) {
-      await activateItinerary(remaining[0]);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itineraryId}/archive`, {});
+      const remaining = sortItinerariesByRecency(itineraries.filter((item) => item.id !== result.itinerary.id));
+      setItineraries(remaining);
+      if (itinerary.id === result.itinerary.id && remaining[0]) {
+        await activateItinerary(remaining[0]);
+      }
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "归档行程失败，请稍后重试。"));
     }
   }
 
@@ -594,34 +669,42 @@ export default function App() {
     const target = itineraries.find((item) => item.id === itineraryId);
     if (!target || itineraries.length <= 1) return;
     if (!window.confirm(`删除「${target.title}」？此操作无法撤销。`)) return;
-    const result = await apiDelete<{ deleted: boolean }>(`/itineraries/${itineraryId}`, { deleted: true });
-    if (!result.deleted) return;
-    const remaining = sortItinerariesByRecency(itineraries.filter((item) => item.id !== itineraryId));
-    setItineraries(remaining);
-    if (itinerary.id === itineraryId && remaining[0]) {
-      await activateItinerary(remaining[0]);
+    try {
+      const result = await apiDelete<{ deleted: boolean }>(`/itineraries/${itineraryId}`);
+      if (!result.deleted) return;
+      const remaining = sortItinerariesByRecency(itineraries.filter((item) => item.id !== itineraryId));
+      setItineraries(remaining);
+      if (itinerary.id === itineraryId && remaining[0]) {
+        await activateItinerary(remaining[0]);
+      }
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "删除行程失败，请稍后重试。"));
     }
   }
 
   async function updateActivityField(activityId: string, changes: Partial<Activity>) {
     markSaving();
-    const fallback = { itinerary: updateActivity(itinerary, activityId, changes) };
-    const result = await apiPatch<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/activities/${activityId}`,
-      changes,
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiPatch<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/activities/${activityId}`, changes);
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "更新活动失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function deleteActivity(activityId: string) {
     markSaving();
-    const fallback = { itinerary: removeActivity(itinerary, activityId) };
-    const result = await apiDelete<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/activities/${activityId}`,
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiDelete<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/activities/${activityId}`);
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "删除活动失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function reorderManualActivity(dayId: string, activityId: string, targetIndex: number) {
@@ -631,80 +714,78 @@ export default function App() {
     const nextIndex = Math.min(Math.max(targetIndex, 0), day.activities.length - 1);
     if (currentIndex < 0 || currentIndex === nextIndex) return;
     markSaving();
-    const fallback = { itinerary: reorderActivity(itinerary, dayId, activityId, nextIndex) };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/days/${dayId}/activities/${activityId}/reorder`,
-      { targetIndex: nextIndex },
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(
+        `/itineraries/${itinerary.id}/days/${dayId}/activities/${activityId}/reorder`,
+        { targetIndex: nextIndex }
+      );
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "调整顺序失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function moveManualActivity(activityId: string, targetDayId: string, targetIndex: number) {
     markSaving();
-    const fallback = { itinerary: moveActivity(itinerary, activityId, targetDayId, targetIndex) };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/activities/${activityId}/move`,
-      { targetDayId, targetIndex },
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
-    setSelectedDayId(targetDayId);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/activities/${activityId}/move`, {
+        targetDayId,
+        targetIndex
+      });
+      commitSavedItinerary(result.itinerary);
+      setSelectedDayId(targetDayId);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "移动活动失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function importSkill(skillId: string, knownSkill?: TravelSkill) {
-    const currentSkill = knownSkill ?? skills.find((skill) => skill.id === skillId);
     markSaving();
-    setImportedSkillIds((current) => (current.includes(skillId) ? current : [...current, skillId]));
-    const result = await apiPost<{ itinerary: TravelItinerary; skill?: TravelSkill }>(
-      `/itineraries/${itinerary.id}/skills/${skillId}`,
-      {},
-      {
-        itinerary: {
-          ...itinerary,
-          importedSkillIds: [...new Set([...itinerary.importedSkillIds, skillId])],
-          updatedAt: new Date().toISOString()
-        },
-        skill: currentSkill
-          ? {
-              ...currentSkill,
-              imports: currentSkill.imports + (itinerary.importedSkillIds.includes(skillId) ? 0 : 1),
-              updatedAt: new Date().toISOString()
-            }
-          : undefined
-      }
-    );
-    const normalized = commitSavedItinerary(result.itinerary);
-    setImportedSkillIds(normalized.importedSkillIds);
-    if (result.skill) replaceSkill(result.skill);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary; skill?: TravelSkill }>(`/itineraries/${itinerary.id}/skills/${skillId}`, {});
+      const normalized = commitSavedItinerary(result.itinerary);
+      setImportedSkillIds(normalized.importedSkillIds);
+      if (result.skill) replaceSkill(result.skill);
+      else if (knownSkill) replaceSkill(knownSkill);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "导入风格失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function removeImportedSkill(skillId: string) {
-    const fallbackItinerary = {
-      ...itinerary,
-      importedSkillIds: itinerary.importedSkillIds.filter((id) => id !== skillId),
-      updatedAt: new Date().toISOString()
-    };
     markSaving();
-    setImportedSkillIds((current) => current.filter((id) => id !== skillId));
-    const result = await apiDelete<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/skills/${skillId}`,
-      { itinerary: fallbackItinerary }
-    );
-    const normalized = commitSavedItinerary(result.itinerary);
-    setImportedSkillIds(normalized.importedSkillIds);
+    try {
+      const result = await apiDelete<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/skills/${skillId}`);
+      const normalized = commitSavedItinerary(result.itinerary);
+      setImportedSkillIds(normalized.importedSkillIds);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "移出风格失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function importSkillMarkdown(markdown: string) {
-    const fallbackSkill = parseSkillMarkdown(markdown);
-    const result = await apiPost<{ skill: TravelSkill }>("/skills/import", { markdown }, { skill: fallbackSkill });
-    replaceSkill(result.skill);
-    setSkillFilter("all");
-    await importSkill(result.skill.id, result.skill);
+    try {
+      const result = await apiPost<{ skill: TravelSkill }>("/skills/import", { markdown });
+      replaceSkill(result.skill);
+      setSkillFilter("all");
+      await importSkill(result.skill.id, result.skill);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "导入风格内容失败，请稍后重试。"));
+    }
   }
 
   function replaceSkill(skill: TravelSkill) {
-    setSkills((current) => [skill, ...current.filter((item) => item.id !== skill.id)]);
+    if (!skill) return;
+    setSkills((current) => [skill, ...current.filter((item): item is TravelSkill => Boolean(item) && item.id !== skill.id)]);
     setCreatorDraft((current) => (current?.id === skill.id ? skill : current));
   }
 
@@ -712,70 +793,64 @@ export default function App() {
     const skill = skills.find((item) => item.id === skillId);
     if (!skill) return;
     const favorited = !skill.favorited;
-    const fallbackSkill = {
-      ...skill,
-      favorited,
-      favorites: Math.max(0, skill.favorites + (favorited ? 1 : -1)),
-      updatedAt: new Date().toISOString()
-    };
-    replaceSkill(fallbackSkill);
-    const result = await apiPost<{ skill: TravelSkill }>(
-      `/skills/${skillId}/favorite`,
-      { favorited },
-      { skill: fallbackSkill }
-    );
-    replaceSkill(result.skill);
+    try {
+      const result = await apiPost<{ skill: TravelSkill }>(`/skills/${skillId}/favorite`, { favorited });
+      replaceSkill(result.skill);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "收藏状态更新失败，请稍后重试。"));
+    }
   }
 
   async function updateSkill(skillId: string, changes: Partial<TravelSkill>) {
     const skill = skills.find((item) => item.id === skillId) ?? creatorDraft;
     if (!skill) return;
-    const timestamp = new Date().toISOString();
-    const fallbackSkill = {
-      ...appendSkillVersion(skill, skillContentChanges(changes), { createdAt: timestamp }),
-      updatedAt: timestamp
-    };
-    replaceSkill(fallbackSkill);
-    const result = await apiPatch<{ skill: TravelSkill }>(`/skills/${skillId}`, changes, { skill: fallbackSkill });
-    replaceSkill(result.skill);
+    try {
+      const result = await apiPatch<{ skill: TravelSkill }>(`/skills/${skillId}`, changes);
+      replaceSkill(result.skill);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "更新风格失败，请稍后重试。"));
+    }
   }
 
   async function publishSkillDraft(changes: Partial<TravelSkill>) {
-    if (!creatorDraft) return;
+    const draft =
+      creatorDraft ??
+      (changes.id ? skills.find((skill) => skill.id === changes.id) : undefined) ??
+      (changes.id && changes.name && changes.createdAt && changes.updatedAt ? (changes as TravelSkill) : undefined);
+    if (!draft) return;
     const timestamp = new Date().toISOString();
-    const publishedChanges = {
-      ...skillContentChanges(changes),
-      status: "published" as const
-    };
-    const fallbackSkill = {
-      ...appendSkillVersion(creatorDraft, publishedChanges, { summary: "发布到广场", createdAt: timestamp }),
-      updatedAt: timestamp
-    };
-    replaceSkill(fallbackSkill);
-    const result = await apiPost<{ skill: TravelSkill }>(
-      `/skills/${creatorDraft.id}/publish`,
-      changes,
-      { skill: fallbackSkill }
-    );
-    replaceSkill(result.skill);
-    setCreatorDraft(null);
-    setSkillFilter("all");
-    setPage("skills");
+    const publishBody = skillContentChanges(changes);
+    delete publishBody.status;
+    try {
+      const result = await apiPost<{ skill: TravelSkill }>(`/skills/${draft.id}/publish`, publishBody);
+      replaceSkill(result.skill);
+      setCreatorDraft(null);
+      setSkillFilter("all");
+      setPage("skills");
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "发布风格失败，请稍后重试。"));
+    }
   }
 
-  async function updatePreferenceSettings(preferences: string[]) {
-    await updateItineraryDetails({ preferences });
+  async function createSavedMemory(content: string) {
+    await apiPost<{ memory: SavedMemory }>("/memories", { content });
+    setSavedMemories(await loadSavedMemories());
   }
 
-  async function clearAgentMemory() {
-    await apiDelete<{ deleted: number }>(
-      `/agent/sessions?itineraryId=${encodeURIComponent(itinerary.id)}`,
-      { deleted: agentMemory?.sessionCount ?? 0 }
-    );
-    setAgentMemory(null);
+  async function updateSavedMemory(memoryId: string, content: string) {
+    await apiPatch<{ memory: SavedMemory }>(`/memories/${memoryId}`, { content });
+    setSavedMemories(await loadSavedMemories());
   }
 
-  function applyAgentResult(result: AgentRunResponse, requestText: string) {
+  async function deleteSavedMemory(memoryId: string) {
+    await apiDelete<{ deleted: boolean }>(`/memories/${memoryId}`);
+    setSavedMemories(await loadSavedMemories());
+  }
+
+  function applyAgentResult(result: AgentRunResponse, requestText: string, runLog?: AgentRunLog) {
     const beforeItinerary = itinerary;
     const normalized = normalizeItineraryForClient(result.itinerary);
     const targets = buildAgentChangeTargets(beforeItinerary, normalized, result.diff);
@@ -784,22 +859,12 @@ export default function App() {
     const styleInfluences = buildAgentStyleInfluences(appliedSkills, result.diff);
     commitSavedItinerary(normalized);
     setImportedSkillIds(normalized.importedSkillIds);
-    setAgentMemory(
-      result.session
-        ? buildAgentMemory([result.session])
-        : {
-            preferenceSummary: inferVisiblePreferenceSummary(normalized, skills, normalized.importedSkillIds, requestText),
-            contextSummary: `最近请求：${requestText}`,
-            sessionCount: 1,
-            latestUpdatedAt: new Date().toISOString()
-          }
-    );
     setMessages((current) => [
       ...current,
-      { role: "user", content: requestText },
       {
         role: "assistant",
         content: formatAssistantMessageWithDiff(result.message.content, result.diff),
+        runLog,
         changeSet:
           result.diff.length > 0
             ? {
@@ -816,6 +881,30 @@ export default function App() {
     setPage("workbench");
   }
 
+  function setActiveAgentRunLog(next: AgentRunLog | null) {
+    agentRunLogRef.current = next;
+    setAgentRunLog(next);
+  }
+
+  function updateActiveAgentRunLog(updater: (current: AgentRunLog | null) => AgentRunLog | null) {
+    const next = updater(agentRunLogRef.current);
+    setActiveAgentRunLog(next);
+  }
+
+  function toggleAgentRunLog(messageIndex: number) {
+    setMessages((current) =>
+      current.map((message, index) =>
+        index === messageIndex && message.runLog
+          ? { ...message, runLog: { ...message.runLog, expanded: !message.runLog.expanded } }
+          : message
+      )
+    );
+  }
+
+  function toggleActiveAgentRunLog() {
+    updateActiveAgentRunLog((current) => (current ? { ...current, expanded: !current.expanded } : current));
+  }
+
   function locateAgentChange(target: AgentChangeTarget) {
     setSelectedDayId(target.dayId);
     setCanvasFocusTarget(target);
@@ -828,65 +917,34 @@ export default function App() {
     const beforeItinerary = message?.changeSet?.beforeItinerary;
     if (!beforeItinerary || message.changeSet?.undone) return;
     markSaving();
-    const fallback = { itinerary: { ...beforeItinerary, updatedAt: new Date().toISOString() } };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${beforeItinerary.id}/restore`,
-      { itinerary: beforeItinerary },
-      fallback
-    );
-    const normalized = commitSavedItinerary(result.itinerary);
-    setImportedSkillIds(normalized.importedSkillIds);
-    setMessages((current) =>
-      current.map((item, index) =>
-        index === messageIndex && item.changeSet
-          ? { ...item, changeSet: { ...item.changeSet, undone: true } }
-          : item
-      )
-    );
-  }
-
-  function buildAgentFallback(requestText: string): AgentRunResponse {
-    const before = itinerary;
-    const targetDay = itinerary.days[1] ?? selectedDay;
-    const importedNames = skills.filter((skill) => importedSkillIds.includes(skill.id)).map((skill) => skillDisplayTitle(skill));
-    const title = requestText.includes("咖啡")
-      ? "街区咖啡与自由探索"
-      : importedNames.some((name) => name.includes("海边"))
-        ? "海边日落与小店探索"
-        : "慢节奏街区探索";
-    const next = addActivity(
-      { ...itinerary, importedSkillIds },
-      targetDay.id,
-      {
-        type: "free_time",
-        title,
-        startTime: "15:00",
-        endTime: "17:00",
-        description: "已根据你的要求补充，可继续手动调整。",
-        tags: ["慢节奏", "助手建议"],
-        budgetCny: 80,
-        transportNote: "同区域内移动，避免跨城奔波。",
-        agentReason: "根据导入 Skill 和用户本轮需求补全空白时段。"
-      },
-      "agent"
-    );
-    const diff = diffItineraries(before, next);
-    const fallback = {
-      itinerary: next,
-      message: { role: "assistant" as const, content: "已更新行程。" },
-      diff
-    };
-    return fallback;
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${beforeItinerary.id}/restore`, { itinerary: beforeItinerary });
+      const normalized = commitSavedItinerary(result.itinerary);
+      setImportedSkillIds(normalized.importedSkillIds);
+      setMessages((current) =>
+        current.map((item, index) =>
+          index === messageIndex && item.changeSet
+            ? { ...item, changeSet: { ...item.changeSet, undone: true } }
+            : item
+        )
+      );
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "撤销本轮改动失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function runAgent(requestOverride?: string) {
     const requestText = (requestOverride ?? agentInput).trim();
     if (!requestText || !selectedDay || agentRunning) return;
-    const fallback = buildAgentFallback(requestText);
     const controller = new AbortController();
     agentAbortRef.current = controller;
+    setMessages((current) => [...current, { role: "user", content: requestText }]);
+    setAgentInput("");
     setAgentRunning(true);
-    setAgentProgress(["正在理解你的需求"]);
+    setAgentProgress([]);
+    setActiveAgentRunLog(createRunningAgentRunLog(requestText));
     try {
       let streamedResult: AgentRunResponse | undefined;
       await apiEventStream(
@@ -903,45 +961,49 @@ export default function App() {
               const message = String((event.data as { message: unknown }).message);
               setAgentProgress((current) => (current.includes(message) ? current : [...current, message]));
             }
+            updateActiveAgentRunLog((current) => updateAgentRunLogFromStream(current, event, requestText));
             if (event.event === "final") {
               streamedResult = event.data as AgentRunResponse;
             }
           }
         }
       );
-      applyAgentResult(streamedResult ?? fallback, requestText);
+      if (!streamedResult) {
+        throw new Error("Agent stream ended without final result");
+      }
+      const result = streamedResult;
+      applyAgentResult(result, requestText, buildCompletedAgentRunLog(result, requestText, agentRunLogRef.current));
       setAgentProgress([]);
+      setActiveAgentRunLog(null);
     } catch (error) {
       if (controller.signal.aborted) {
+        const stoppedLog = buildTerminalAgentRunLog(agentRunLogRef.current, requestText, "stopped", "已停止本次处理");
+        setActiveAgentRunLog(null);
         setAgentProgress(["已停止本次处理，行程没有改动。"]);
         setMessages((current) => [
           ...current,
-          { role: "user", content: requestText },
-          { role: "assistant", content: "已停止本次处理，行程没有改动。" }
+          { role: "assistant", content: "已停止本次处理，行程没有改动。", runLog: stoppedLog }
         ]);
-        setAgentInput("");
         return;
       }
       if (error instanceof ApiStreamEventError) {
+        const failedLog = buildTerminalAgentRunLog(agentRunLogRef.current, requestText, "failed", error.message);
+        setActiveAgentRunLog(null);
         setAgentProgress([]);
         setMessages((current) => [
           ...current,
-          { role: "user", content: requestText },
-          { role: "assistant", content: `${error.message}\n\n行程没有改动。` }
+          { role: "assistant", content: `${error.message}\n\n行程没有改动。`, runLog: failedLog }
         ]);
         return;
       }
-      const result = await apiPost<AgentRunResponse>(
-        "/agent/run",
-        {
-          itineraryId: itinerary.id,
-          message: requestText,
-          importedSkillIds
-        },
-        fallback
-      );
-      applyAgentResult(result, requestText);
+      const message =
+        error instanceof Error && error.message === "Agent stream ended without final result"
+          ? "助手没有返回最终结果，请重试。"
+          : "助手服务连接失败，请确认 API 后端已启动后重试。";
+      const failedLog = buildTerminalAgentRunLog(agentRunLogRef.current, requestText, "failed", message);
       setAgentProgress([]);
+      setActiveAgentRunLog(null);
+      setMessages((current) => [...current, { role: "assistant", content: `${message}\n\n行程没有改动。`, runLog: failedLog }]);
     } finally {
       if (agentAbortRef.current === controller) {
         agentAbortRef.current = null;
@@ -953,21 +1015,31 @@ export default function App() {
   function stopAgent() {
     agentAbortRef.current?.abort();
     setAgentRunning(false);
+    updateActiveAgentRunLog((current) =>
+      current ? buildTerminalAgentRunLog(current, "本轮请求", "stopped", "已停止本次处理") : current
+    );
     setAgentProgress(["已停止本次处理，行程没有改动。"]);
   }
 
-  async function extractSkill() {
+  async function startSkillCreatorSession(): Promise<SkillCreatorStartResponse> {
     const useItineraryContext = creatorSourceMode === "itinerary" || creatorSourceMode === "conversation";
-    const fallbackSkill = useItineraryContext
-      ? summarizeItineraryAsSkill(itinerary, creatorText)
-      : createExternalTextSkillDraft(creatorText);
-    const result = await apiPost<{ skill: TravelSkill }>(
-      "/skills/extract",
-      useItineraryContext ? { sourceText: creatorText, itineraryId: itinerary.id } : { sourceText: creatorText },
-      { skill: fallbackSkill }
+    const result = await apiPostStrict<SkillCreatorStartResponse>(
+      "/skills/creator/start",
+      useItineraryContext ? { sourceText: creatorText, itineraryId: itinerary.id } : { sourceText: creatorText }
     );
-    setSkills((current) => [result.skill, ...current.filter((skill) => skill.id !== result.skill.id)]);
-    setCreatorDraft(result.skill);
+    setSkills((current) => [result.session.draft, ...current.filter((skill) => skill.id !== result.session.draft.id)]);
+    setCreatorDraft(result.session.draft);
+    return result;
+  }
+
+  async function replyToSkillCreator(
+    sessionId: string,
+    answer: { selectedOptionIds: string[]; customAnswer: string }
+  ): Promise<SkillCreatorReplyResponse> {
+    const result = await apiPostStrict<SkillCreatorReplyResponse>(`/skills/creator/${sessionId}/reply`, answer);
+    setSkills((current) => [result.session.draft, ...current.filter((skill) => skill.id !== result.session.draft.id)]);
+    setCreatorDraft(result.session.draft);
+    return result;
   }
 
   function useCurrentItineraryAsSkillSource() {
@@ -987,22 +1059,33 @@ export default function App() {
   async function addRemoteDay(position: "after" | "before" = "after") {
     markSaving();
     const nextItinerary = position === "before" ? addDayBefore(itinerary) : addDay(itinerary);
-    const fallback = { itinerary: nextItinerary };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days`, { position }, fallback);
-    const shouldRestore =
-      position === "before" && (result.itinerary.startDate !== nextItinerary.startDate || result.itinerary.days[0]?.date !== nextItinerary.days[0]?.date);
-    const saved = shouldRestore
-      ? await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/restore`, { itinerary: nextItinerary }, fallback)
-      : result;
-    const normalized = commitSavedItinerary(saved.itinerary);
-    setSelectedDayId(position === "before" ? normalized.days[0]?.id ?? selectedDay.id : normalized.days.at(-1)?.id ?? selectedDay.id);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days`, { position });
+      const shouldRestore =
+        position === "before" && (result.itinerary.startDate !== nextItinerary.startDate || result.itinerary.days[0]?.date !== nextItinerary.days[0]?.date);
+      const saved = shouldRestore
+        ? await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/restore`, { itinerary: nextItinerary })
+        : result;
+      const normalized = commitSavedItinerary(saved.itinerary);
+      setSelectedDayId(position === "before" ? normalized.days[0]?.id ?? selectedDay.id : normalized.days.at(-1)?.id ?? selectedDay.id);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "新增日期失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function exportItinerary() {
-    const text = await apiText(`/itineraries/${itinerary.id}/export`, "");
-    setExportText(text);
-    if (text.trim()) {
-      downloadTextFile(text, `${sanitizeFilename(itinerary.title)}-${itinerary.startDate}.md`);
+    try {
+      const text = await apiText(`/itineraries/${itinerary.id}/export`);
+      setExportText(text);
+      setPage("result");
+      if (text.trim()) {
+        downloadTextFile(text, `${sanitizeFilename(itinerary.title)}-${itinerary.startDate}.md`);
+      }
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "导出失败，请稍后重试。"));
     }
   }
 
@@ -1014,43 +1097,49 @@ export default function App() {
     overrides: TransportLegOverride = {}
   ) {
     markSaving();
-    const fallback = {
-      itinerary: setTransportLeg(
-        itinerary,
-        dayId,
-        createLocalTransportLegDraft(itinerary, dayId, fromActivityId, toActivityId, mode, overrides)
-      )
-    };
-    const result = await apiPost<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/days/${dayId}/transport-legs`,
-      { fromActivityId, toActivityId, mode, ...overrides },
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}/days/${dayId}/transport-legs`, {
+        fromActivityId,
+        toActivityId,
+        mode,
+        ...overrides
+      });
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "路线设置失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function removeActivityTransport(dayId: string, fromActivityId: string, toActivityId: string) {
     markSaving();
-    const fallback = {
-      itinerary: removeTransportLeg(itinerary, dayId, fromActivityId, toActivityId)
-    };
-    const result = await apiDelete<{ itinerary: TravelItinerary }>(
-      `/itineraries/${itinerary.id}/days/${dayId}/transport-legs/${encodeURIComponent(fromActivityId)}/${encodeURIComponent(toActivityId)}`,
-      fallback
-    );
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiDelete<{ itinerary: TravelItinerary }>(
+        `/itineraries/${itinerary.id}/days/${dayId}/transport-legs/${encodeURIComponent(fromActivityId)}/${encodeURIComponent(toActivityId)}`
+      );
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "路线删除失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function completeMissingRoutes(mode: MapRouteMode = "walking") {
     markSaving();
-    const fallback = { itinerary: completeMissingRoutesLocally(itinerary, mode), completed: 0, skipped: 0 };
-    const result = await apiPost<{ itinerary: TravelItinerary; completed: number; skipped: number }>(
-      `/itineraries/${itinerary.id}/transport-legs/complete`,
-      { mode },
-      fallback
-    );
-    const normalized = normalizeItineraryForClient(result.itinerary);
-    commitSavedItinerary(mergeBackgroundCanvasUpdates(normalized, itineraryRef.current));
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary; completed: number; skipped: number }>(
+        `/itineraries/${itinerary.id}/transport-legs/complete`,
+        { mode }
+      );
+      const normalized = normalizeItineraryForClient(result.itinerary);
+      commitSavedItinerary(mergeBackgroundCanvasUpdates(normalized, itineraryRef.current));
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "路线补全失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function updateDayWeather(dayId: string) {
@@ -1058,41 +1147,29 @@ export default function App() {
     if (!day) return;
     markSaving();
     const weatherCity = itinerary.destinationPlace?.city ?? itinerary.destination;
-    const weather = createFallbackWeather(weatherCity, day.date);
-    const result = await apiPost<{ itinerary: TravelItinerary; weather: WeatherSummary }>(
-      `/itineraries/${itinerary.id}/days/${dayId}/weather`,
-      { city: weatherCity },
-      {
-        weather,
-        itinerary: setDayWeather(itinerary, dayId, weather)
-      }
-    );
-    const normalized = normalizeItineraryForClient(result.itinerary);
-    commitSavedItinerary(mergeBackgroundCanvasUpdates(normalized, itineraryRef.current));
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary; weather: WeatherSummary }>(`/itineraries/${itinerary.id}/days/${dayId}/weather`, {
+        city: weatherCity
+      });
+      const normalized = normalizeItineraryForClient(result.itinerary);
+      commitSavedItinerary(mergeBackgroundCanvasUpdates(normalized, itineraryRef.current));
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "天气更新失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   async function updateItineraryDetails(changes: Partial<TravelItinerary>) {
     markSaving();
-    const base =
-      changes.startDate !== undefined || changes.endDate !== undefined
-        ? resizeItineraryDateRange(
-            itinerary,
-            changes.startDate ?? itinerary.startDate,
-            changes.endDate ?? itinerary.endDate ?? changes.startDate ?? itinerary.startDate
-          )
-        : itinerary;
-    const fallback = {
-      itinerary: {
-        ...base,
-        ...changes,
-        startDate: base.startDate,
-        endDate: base.endDate,
-        days: base.days,
-        updatedAt: new Date().toISOString()
-      }
-    };
-    const result = await apiPatch<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}`, changes, fallback);
-    commitSavedItinerary(result.itinerary);
+    try {
+      const result = await apiPatch<{ itinerary: TravelItinerary }>(`/itineraries/${itinerary.id}`, changes);
+      commitSavedItinerary(result.itinerary);
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "更新行程信息失败，请稍后重试。"));
+      setSaveStatus("保存失败");
+    }
   }
 
   function markSaving() {
@@ -1115,29 +1192,20 @@ export default function App() {
 
   async function createTrip(input: CreateTripFormInput) {
     const normalizedInput = normalizeCreateTripInput(input);
-    const fallback = {
-      itinerary: createDraftItinerary({
-        title: normalizedInput.title,
-        destination: normalizedInput.destination,
-        destinationPlace: normalizedInput.destinationPlace,
-        startDate: normalizedInput.startDate,
-        endDate: normalizedInput.endDate,
-        budgetCny: normalizedInput.budgetCny,
-        companions: normalizedInput.companions,
-        preferences: normalizedInput.preferences,
-        notes: normalizedInput.notes
-      })
-    };
-    const result = await apiPost<{ itinerary: TravelItinerary }>("/itineraries", normalizedInput, fallback);
-    const normalized = commitSavedItinerary(result.itinerary);
-    setSelectedDayId(normalized.days[0]?.id ?? "");
-    setImportedSkillIds([]);
-    setExportText("");
-    setAgentMemory(null);
-    setMessages([]);
-    rememberLastItineraryId(normalized.id);
-    setNewTripDialogOpen(false);
-    setPage("workbench");
+    try {
+      const result = await apiPost<{ itinerary: TravelItinerary }>("/itineraries", normalizedInput);
+      const normalized = commitSavedItinerary(result.itinerary);
+      setSelectedDayId(normalized.days[0]?.id ?? "");
+      setImportedSkillIds([]);
+      setExportText("");
+      setMessages([]);
+      rememberLastItineraryId(normalized.id);
+      setNewTripDialogOpen(false);
+      setPage("workbench");
+      setServiceStatus("");
+    } catch (error) {
+      setServiceStatus(readApiRequestErrorMessage(error, "创建行程失败，请稍后重试。"));
+    }
   }
 
   return (
@@ -1160,7 +1228,21 @@ export default function App() {
             data-testid={page === "workbench" ? "workbench-main" : undefined}
             className={cn("min-w-0 bg-white", page === "workbench" && "min-h-0 overflow-hidden")}
           >
-            {page === "workbench" && (
+            {page === "workbench" && itineraries.length === 0 && (
+              <div className="flex h-full items-center justify-center p-6">
+                <section className="grid max-w-md gap-4 rounded-[24px] border border-border bg-[#fbfbf9] p-6 text-center">
+                  <div className="grid gap-2">
+                    <h2 className="text-2xl font-black">还没有行程</h2>
+                    <p className="text-sm font-semibold text-muted-foreground">先创建一个行程，再开始规划地点、路线、天气和旅行风格。</p>
+                  </div>
+                  <Button onClick={() => setNewTripDialogOpen(true)}>
+                    <Plus data-icon="inline-start" />
+                    新建行程
+                  </Button>
+                </section>
+              </div>
+            )}
+            {page === "workbench" && itineraries.length > 0 && (
               <Workbench
                 itinerary={itinerary}
                 selectedDayId={selectedDay.id}
@@ -1191,12 +1273,20 @@ export default function App() {
                 onFocusTargetConsumed={() => setCanvasFocusTarget(null)}
               />
             )}
+            {page === "result" && (
+              <TravelResultPage
+                itinerary={itinerary}
+                exportText={exportText}
+                onBackToWorkbench={() => setPage("workbench")}
+              />
+            )}
             {page === "skills" && (
               <SkillPlaza
                 skills={skills}
                 recommendations={recommendations}
                 itinerary={itinerary}
                 importedSkillIds={importedSkillIds}
+                savedMemoryKeywords={savedMemoryKeywords}
                 filter={skillFilter}
                 onImport={importSkill}
                 onRemoveImport={removeImportedSkill}
@@ -1209,22 +1299,22 @@ export default function App() {
             {page === "creator" && (
               <SkillCreator
                 sourceText={creatorText}
-                draft={creatorDraft}
                 onSourceTextChange={(value) => {
                   setCreatorText(value);
                   setCreatorSourceMode("text");
                 }}
                 onUseCurrentItinerary={useCurrentItineraryAsSkillSource}
-                onExtract={extractSkill}
+                onStart={startSkillCreatorSession}
+                onCreatorReply={replyToSkillCreator}
                 onPublish={publishSkillDraft}
               />
             )}
             {page === "settings" && (
-              <PreferenceSettings
-                itinerary={itinerary}
-                agentMemory={agentMemory}
-                onSavePreferences={updatePreferenceSettings}
-                onClearMemory={clearAgentMemory}
+              <SavedMemorySettings
+                memories={savedMemories}
+                onCreateMemory={createSavedMemory}
+                onUpdateMemory={updateSavedMemory}
+                onDeleteMemory={deleteSavedMemory}
               />
             )}
             {page === "evaluation" && <EvaluationPage />}
@@ -1236,15 +1326,15 @@ export default function App() {
                   type="button"
                   aria-label="关闭助手面板"
                   data-testid="agent-backdrop"
-                  className="fixed inset-0 z-[900] bg-black/30 2xl:hidden"
+                  className="fixed inset-0 z-[900] bg-black/30 min-[769px]:hidden"
                   onClick={() => setAgentDrawerOpen(false)}
                 />
               )}
               <div
                 data-testid="agent-panel-shell"
                 className={cn(
-                  "fixed inset-y-0 right-0 z-[1000] w-full border-l border-border bg-[#fbfbf9] shadow-2xl sm:w-[min(420px,calc(100vw-24px))] 2xl:static 2xl:min-h-0 2xl:w-auto 2xl:shadow-none",
-                  agentDrawerOpen ? "block" : "hidden 2xl:block"
+                  "fixed inset-y-0 right-0 z-[1000] w-full border-l border-border bg-[#fbfbf9] shadow-2xl sm:w-[min(440px,calc(100vw-24px))] min-[769px]:static min-[769px]:min-h-0 min-[769px]:w-auto min-[769px]:shadow-none",
+                  agentDrawerOpen ? "block" : "hidden min-[769px]:block"
                 )}
               >
                 <AgentPanel
@@ -1254,11 +1344,15 @@ export default function App() {
                   agentInput={agentInput}
                   agentRunning={agentRunning}
                   agentProgress={agentProgress}
+                  agentRunLog={agentRunLog}
+                  savedMemoryKeywords={savedMemoryKeywords}
                   onImportSkill={importSkill}
                   onRemoveSkill={removeImportedSkill}
                   onAgentInputChange={setAgentInput}
                   onRunAgent={runAgent}
                   onStopAgent={stopAgent}
+                  onToggleAgentRunLog={toggleAgentRunLog}
+                  onToggleActiveAgentRunLog={toggleActiveAgentRunLog}
                   onCreateSkillFromConversation={useAssistantConversationAsSkillSource}
                   onUndoAgentChange={undoAgentChange}
                   onLocateAgentChange={locateAgentChange}
@@ -1275,35 +1369,341 @@ export default function App() {
   );
 }
 
-function buildAgentMemory(sessions: AgentSession[]): AgentMemory | null {
-  const latest = sessions[0];
-  if (!latest) return null;
-  return {
-    preferenceSummary: latest.userPreferenceSummary,
-    contextSummary: latest.contextSummary,
-    sessionCount: sessions.length,
-    latestUpdatedAt: latest.updatedAt || latest.createdAt
-  };
-}
-
-function inferVisiblePreferenceSummary(
-  itinerary: TravelItinerary,
-  skills: TravelSkill[],
-  importedSkillIds: string[],
-  requestText: string
-): string {
-  const importedNames = skills
-    .filter((skill) => importedSkillIds.includes(skill.id))
-    .map((skill) => skillDisplayTitle(skill));
-  const requestTokens = ["慢节奏", "咖啡", "citywalk", "亲子", "博物馆", "海边", "日落", "小店", "雨天", "室内", "夜景", "不赶路"].filter(
-    (token) => requestText.includes(token)
-  );
-  return [...new Set([...itinerary.preferences, ...importedNames, ...requestTokens])].join("、") || "暂无稳定偏好";
-}
-
 function formatAssistantMessageWithDiff(content: string, diff: string[]): string {
   if (diff.length === 0) return content;
   return [content, "本轮改动", ...diff.map((item) => `- ${item}`)].join("\n");
+}
+
+function createRunningAgentRunLog(requestText: string): AgentRunLog {
+  return {
+    id: `agent-run-${Date.now()}`,
+    status: "running",
+    expanded: true,
+    summary: "思考中",
+    items: []
+  };
+}
+
+function updateAgentRunLogFromStream(
+  current: AgentRunLog | null,
+  event: { event: string; data: unknown },
+  requestText: string
+): AgentRunLog {
+  const base = current ?? createRunningAgentRunLog(requestText);
+  if (event.event === "final") return base;
+
+  if (event.event === "activity") {
+    const activity = readAgentRunEvent(event.data);
+    if (!activity) return base;
+    const item = agentRunEventToActivityItem(activity, base.items.length);
+    const completedItems = activity.type === "thought_summary" ? base.items : completeRunningThoughts(base.items);
+    return {
+      ...base,
+      status: item.kind === "error" ? "failed" : "running",
+      expanded: true,
+      summary: summarizeRunningAgentActivity(item),
+      items: [...completedItems.filter((existing) => existing.id !== item.id), item]
+    };
+  }
+
+  const item = streamEventToAgentActivity(event, base.items.length);
+  if (!item) return base;
+  const completedItems = completeRunningThoughts(base.items);
+  return {
+    ...base,
+    status: item.kind === "error" ? "failed" : "running",
+    expanded: true,
+    summary: summarizeRunningAgentActivity(item),
+    items: [...completedItems, item]
+  };
+}
+
+function streamEventToAgentActivity(
+  event: { event: string; data: unknown },
+  index: number
+): AgentActivityItem | undefined {
+  if (event.event === "progress" || event.event === "action") {
+    const detail = readAgentStreamString(event.data, "message");
+    if (!detail) return undefined;
+    return {
+      id: `${event.event}-${Date.now()}-${index}`,
+      kind: "output",
+      title: "行动输出",
+      detail,
+      status: "completed"
+    };
+  }
+  if (event.event === "tool_call") {
+    return {
+      id: `tool-call-${Date.now()}-${index}`,
+      kind: "tool_call",
+      title: readAgentStreamString(event.data, "title") ?? "调用工具",
+      detail: readAgentStreamString(event.data, "detail"),
+      agent: readAgentStreamAgent(event.data),
+      traceType: "tool_call",
+      status: "running"
+    };
+  }
+  if (event.event === "state_patch") {
+    return {
+      id: `state-patch-${Date.now()}-${index}`,
+      kind: "state_patch",
+      title: readAgentStreamString(event.data, "title") ?? "写入行程",
+      detail: readAgentStreamString(event.data, "detail"),
+      agent: readAgentStreamAgent(event.data),
+      traceType: "state_patch",
+      status: "completed"
+    };
+  }
+  if (event.event === "handoff") {
+    return {
+      id: `handoff-${Date.now()}-${index}`,
+      kind: "handoff",
+      title: readAgentStreamString(event.data, "title") ?? "任务派发",
+      detail: readAgentStreamString(event.data, "detail"),
+      agent: readAgentStreamAgent(event.data),
+      traceType: "handoff",
+      status: "completed"
+    };
+  }
+  return undefined;
+}
+
+function buildCompletedAgentRunLog(
+  result: AgentRunResponse,
+  requestText: string,
+  current: AgentRunLog | null
+): AgentRunLog {
+  const base = current ?? createRunningAgentRunLog(requestText);
+  const streamItems = completeRunningThoughts(base.items);
+  const eventItems = sortAgentRunEvents(result.events ?? []).map((event, index) => agentRunEventToActivityItem(event, index));
+  const traces = sortAgentTraces(eventItems.length > 0 ? [] : (result.traces ?? result.session?.traces ?? []));
+  const traceItems = traces.map(agentTraceToActivityItem);
+  const items = mergeAgentActivityItems(streamItems, eventItems.length > 0 ? eventItems : traceItems).map((item) => ({
+    ...item,
+    status: item.status === "failed" ? "failed" as const : "completed" as const
+  }));
+  return {
+    id: base.id,
+    status: "completed",
+    expanded: false,
+    summary: completedAgentRunSummary(items),
+    items
+  };
+}
+
+function buildTerminalAgentRunLog(
+  current: AgentRunLog | null,
+  requestText: string,
+  status: "failed" | "stopped",
+  reason: string
+): AgentRunLog {
+  const base = current ?? createRunningAgentRunLog(requestText);
+  const items = completeRunningThoughts(base.items);
+  const terminalItems =
+    status === "failed"
+      ? [
+          ...items,
+          {
+            id: `agent-error-${Date.now()}`,
+            kind: "error" as const,
+            title: "执行异常",
+            detail: reason,
+            traceType: "error" as const,
+            status: "failed" as const
+          }
+        ]
+      : items;
+  return {
+    id: base.id,
+    status,
+    expanded: false,
+    summary: `${status === "failed" ? "执行失败" : "已停止本次处理"} · ${terminalItems.length} 步`,
+    items: terminalItems
+  };
+}
+
+function completeRunningThoughts(items: AgentActivityItem[]): AgentActivityItem[] {
+  return items.map((item) =>
+    item.kind === "thought" && item.status === "running"
+      ? { ...item, title: completedThoughtTitle(item.title), detail: undefined, status: "completed" }
+      : item
+  );
+}
+
+function completedThoughtTitle(title: string): string {
+  const normalized = title.replace(/^正在/, "").trim();
+  if (/行程上下文/.test(normalized)) return "已读取行程上下文";
+  if (normalized.startsWith("已")) return normalized;
+  return `已完成${normalized}`;
+}
+
+function agentTraceToActivityItem(trace: AgentTraceEvent): AgentActivityItem {
+  const kind: AgentActivityKind =
+    trace.type === "message"
+      ? "thought"
+      : trace.type === "tool_call"
+        ? "tool_call"
+        : trace.type === "state_patch"
+          ? "state_patch"
+          : trace.type === "handoff"
+            ? "handoff"
+            : "error";
+  return {
+    id: trace.id,
+    kind,
+    title: trace.type === "message" ? completedThoughtTitle(trace.title) : trace.title,
+    detail: trace.detail,
+    agent: trace.agent,
+    traceType: trace.type,
+    status: trace.type === "error" ? "failed" : "completed"
+  };
+}
+
+function agentRunEventToActivityItem(event: AgentRunEvent, index: number): AgentActivityItem {
+  const kind = agentRunEventKind(event.type);
+  return {
+    id: event.id || `agent-event-${Date.now()}-${index}`,
+    kind,
+    title: kind === "output" ? "回复" : event.title,
+    detail: event.detail,
+    agent: event.agent,
+    traceType: agentRunEventTraceType(event.type),
+    status: event.status,
+    technical: event.technical
+  };
+}
+
+function agentRunEventKind(type: AgentRunEvent["type"]): AgentActivityKind {
+  if (type === "thought_summary") return "thought";
+  if (type === "assistant_message") return "output";
+  if (type === "tool_call") return "tool_call";
+  if (type === "tool_result") return "tool_result";
+  if (type === "state_patch") return "state_patch";
+  if (type === "handoff") return "handoff";
+  if (type === "final_signal") return "final_signal";
+  return "error";
+}
+
+function agentRunEventTraceType(type: AgentRunEvent["type"]): AgentTraceEvent["type"] | undefined {
+  if (type === "thought_summary" || type === "assistant_message" || type === "final_signal") return "message";
+  if (type === "tool_call" || type === "tool_result") return "tool_call";
+  if (type === "state_patch") return "state_patch";
+  if (type === "handoff") return "handoff";
+  if (type === "error") return "error";
+  return undefined;
+}
+
+function mergeAgentActivityItems(streamItems: AgentActivityItem[], traceItems: AgentActivityItem[]): AgentActivityItem[] {
+  const merged = [...streamItems];
+  for (const item of traceItems) {
+    if (item.kind === "thought" && merged.some((candidate) => candidate.kind === "thought")) continue;
+    if (merged.some((candidate) => isSameAgentActivity(candidate, item))) continue;
+    merged.push(item);
+  }
+  return merged;
+}
+
+function primaryAgentActivityItems(items: AgentActivityItem[]): AgentActivityItem[] {
+  return items.filter((item) => item.kind === "output" || item.kind === "tool_call" || item.kind === "tool_result" || item.kind === "error");
+}
+
+function reasoningAgentActivityItems(items: AgentActivityItem[]): AgentActivityItem[] {
+  return items.filter((item) => item.kind === "thought" && item.title === "模型思考" && Boolean(item.detail));
+}
+
+function completedAgentRunSummary(items: AgentActivityItem[]): string {
+  const primaryCount = primaryAgentActivityItems(items).length;
+  if (primaryCount > 0) return `已完成模型与工具调用 · ${primaryCount} 步`;
+  return `已完成后台状态 · ${items.length} 步`;
+}
+
+function isSameAgentActivity(left: AgentActivityItem, right: AgentActivityItem): boolean {
+  return (
+    left.kind === right.kind &&
+    left.title === right.title &&
+    (left.detail ?? "") === (right.detail ?? "") &&
+    left.agent === right.agent
+  );
+}
+
+function summarizeRunningAgentActivity(item: AgentActivityItem): string {
+  if (item.kind === "tool_call") return `正在调用工具：${item.title}`;
+  if (item.kind === "tool_result") return item.detail ? `工具完成：${item.detail}` : `工具完成：${item.title}`;
+  if (item.kind === "output" && item.detail) return item.detail;
+  if (item.kind === "state_patch") return "正在写入行程";
+  if (item.kind === "handoff") return "正在派发任务";
+  if (item.kind === "final_signal") return item.detail ?? "任务已完成";
+  return item.title;
+}
+
+function shouldShowAgentActivityLabel(item: AgentActivityItem): boolean {
+  return item.kind !== "output";
+}
+
+function shouldShowAgentBadge(item: AgentActivityItem): boolean {
+  return item.kind !== "output";
+}
+
+function agentActivityLabel(item: AgentActivityItem): string {
+  const labels: Record<AgentActivityKind, string> = {
+    thought: "思考",
+    output: "对外输出",
+    tool_call: "工具调用",
+    tool_result: "工具结果",
+    state_patch: "写入画布",
+    handoff: "任务派发",
+    final_signal: "完成信号",
+    error: "异常"
+  };
+  return labels[item.kind] ?? (item.traceType ? traceTypeLabel(item.traceType) : "步骤");
+}
+
+function readAgentRunEvent(data: unknown): AgentRunEvent | undefined {
+  if (!data || typeof data !== "object") return undefined;
+  const event = data as Partial<AgentRunEvent>;
+  if (!event.id || !event.type || !event.status || !event.title) return undefined;
+  return event as AgentRunEvent;
+}
+
+function sortAgentRunEvents(events: AgentRunEvent[]): AgentRunEvent[] {
+  return [...events].sort((left, right) => left.sequence - right.sequence);
+}
+
+function hasTechnicalPayload(technical: AgentActivityItem["technical"]): boolean {
+  return Boolean(technical && ("input" in technical || "output" in technical));
+}
+
+function formatTechnicalPayload(technical: AgentActivityItem["technical"]): string {
+  try {
+    return JSON.stringify(technical, null, 2);
+  } catch {
+    return String(technical);
+  }
+}
+
+function readAgentStreamString(data: unknown, key: string): string | undefined {
+  if (!data || typeof data !== "object" || !(key in data)) return undefined;
+  const value = (data as Record<string, unknown>)[key];
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function readAgentStreamAgent(data: unknown): AgentTraceEvent["agent"] | undefined {
+  const value = readAgentStreamString(data, "agent");
+  return isAgentName(value) ? value : undefined;
+}
+
+function isAgentName(value: unknown): value is AgentTraceEvent["agent"] {
+  return (
+    value === "MainAgent" ||
+    value === "StyleAgent" ||
+    value === "SkillExtractorAgent" ||
+    value === "WeatherAgent" ||
+    value === "TransportAgent" ||
+    value === "AttractionAgent" ||
+    value === "PlannerAgent" ||
+    value === "CriticAgent"
+  );
 }
 
 function buildAgentStyleInfluences(skills: TravelSkill[], diffItems: string[]): AgentStyleInfluence[] {
@@ -1353,30 +1753,6 @@ function buildRouteConflictOptionActions(content: string): AssistantAction[] {
     .map(({ label, requestText }) => ({ label, requestText }));
 }
 
-function formatSkillImportMessage(
-  skill: TravelSkill,
-  itinerary: TravelItinerary,
-  recommendation?: SkillRecommendation
-): string {
-  const fitReasons = buildSkillFitReasons(skill, recommendation, itinerary).slice(0, 2);
-  const impactScope = buildSkillImpactScope(skill);
-  const avoidanceHints = buildSkillAvoidanceHints(skill, itinerary);
-  const lines = [
-    `已使用「${skillDisplayTitle(skill)}」。`,
-    "影响范围",
-    ...impactScope.map((item) => `- ${item}`),
-    "适配当前行程",
-    ...fitReasons.map((item) => `- ${item}`)
-  ];
-  if (skill.rules.length > 0) {
-    lines.push("优先遵循", ...skill.rules.slice(0, 2).map((rule) => `- ${rule}`));
-  }
-  if (avoidanceHints.length > 0) {
-    lines.push("需要避开", ...avoidanceHints.map((hint) => `- ${hint}`));
-  }
-  return lines.join("\n");
-}
-
 function buildSkillImpactScope(skill: TravelSkill): string[] {
   const text = [skill.displayName, skill.description, skill.body, ...skill.tags, ...skill.rules].join(" ");
   const scope = new Set<string>();
@@ -1395,7 +1771,6 @@ function buildSkillAvoidanceHints(skill: TravelSkill, itinerary: TravelItinerary
     itinerary.title,
     itinerary.destination,
     itinerary.notes ?? "",
-    ...itinerary.preferences,
     ...itinerary.days.flatMap((day) =>
       day.activities.flatMap((activity) => [
         activity.title,
@@ -1616,127 +1991,43 @@ function parsePreferenceText(value: string): string[] {
     .filter(Boolean);
 }
 
-type PreferenceGroupView = {
-  id: string;
-  label: string;
-  description: string;
-  items: string[];
-};
-type PreferenceEvidenceView = {
-  preference: string;
-  sources: string[];
-  latestUse: string;
-};
-
-const preferenceGroupDefinitions: Array<Omit<PreferenceGroupView, "items"> & { keywords: RegExp }> = [
-  {
-    id: "pace",
-    label: "节奏与强度",
-    description: "影响每天活动密度、休息段和开始结束时间。",
-    keywords: /慢|松弛|轻松|不赶|休息|早起|夜|少排队|低强度/
-  },
-  {
-    id: "places",
-    label: "地点兴趣",
-    description: "影响景点、街区和室内外活动的优先级。",
-    keywords: /博物馆|展|海边|湖|山|街区|citywalk|夜景|小店|景点|公园|室内/
-  },
-  {
-    id: "food",
-    label: "餐饮与停留",
-    description: "影响餐厅、咖啡、甜品和中途停留安排。",
-    keywords: /咖啡|美食|餐|茶|甜品|小吃|酒吧|早饭|午饭|晚饭/
-  },
-  {
-    id: "transport",
-    label: "交通与体力",
-    description: "影响步行距离、换乘方式和跨区路线。",
-    keywords: /少走路|步行|骑行|公交|地铁|打车|驾车|换乘|跨区|交通|距离/
-  },
-  {
-    id: "constraints",
-    label: "约束与禁忌",
-    description: "影响需要避免的天气、时段、人群或风险。",
-    keywords: /不要|避免|禁忌|雨|暴晒|排队|拥挤|高峰|预算|亲子|老人|朋友|情侣|独自/
-  }
-];
-
-function groupTravelPreferences(preferences: string[]): PreferenceGroupView[] {
-  const used = new Set<string>();
-  const groups = preferenceGroupDefinitions.map((definition) => {
-    const items = preferences.filter((preference) => {
-      if (used.has(preference)) return false;
-      const matched = definition.keywords.test(preference);
-      if (matched) used.add(preference);
-      return matched;
-    });
-    return {
-      id: definition.id,
-      label: definition.label,
-      description: definition.description,
-      items
-    };
-  });
-  const custom = preferences.filter((preference) => !used.has(preference));
-  return [
-    ...groups,
-    {
-      id: "custom",
-      label: "其他偏好",
-      description: "暂未归类，但仍会传给助手和风格推荐。",
-      items: custom
-    }
-  ];
+function readApiRequestErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiRequestError) return error.message || fallback;
+  if (error instanceof Error && error.message.trim()) return error.message.trim();
+  return fallback;
 }
 
-function buildPreferenceEvidence(preferences: string[], groups: PreferenceGroupView[], agentMemory: AgentMemory | null): PreferenceEvidenceView[] {
-  const conversationText = [agentMemory?.preferenceSummary, agentMemory?.contextSummary].filter(Boolean).join("、");
-  return preferences.map((preference) => {
-    const group = groups.find((candidate) => candidate.items.includes(preference));
-    const sources = ["当前行程"];
-    if (conversationText.includes(preference)) sources.push("最近对话");
-    return {
-      preference,
-      sources,
-      latestUse: preferenceLatestUseLabel(group?.id)
-    };
-  });
+function sortSavedMemoriesByUpdatedAt(memories: SavedMemory[]): SavedMemory[] {
+  return [...memories].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
 }
 
-function preferenceLatestUseLabel(groupId?: string): string {
-  if (groupId === "pace") return "最近用于节奏安排";
-  if (groupId === "places" || groupId === "food") return "最近用于地点取舍";
-  if (groupId === "transport") return "最近用于路线调整";
-  if (groupId === "constraints") return "最近用于约束检查";
-  return "最近用于助手回复";
-}
-
-function formatCompactDateTime(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(date);
+function deriveSavedMemoryKeywords(memories: SavedMemory[], skills: TravelSkill[]): string[] {
+  const skillTags = new Set(skills.flatMap((skill) => skill.tags ?? []));
+  const extracted = memories.flatMap((memory) =>
+    memory.content
+      .split(/[,\n，、\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .filter((item) => item.length >= 2)
+  );
+  return [...new Set([...skillTags, ...extracted])];
 }
 
 function normalizeCreateTripInput(input: CreateTripFormInput): CreateTripFormInput {
   const title = input.title.trim() || "未命名旅行";
-  const destination = input.destination.trim() || input.destinationPlace?.city?.replace(/市$/, "") || input.destinationPlace?.name || "待定目的地";
+  const destination = input.destination.trim() || input.destinationPlace?.name || input.destinationPlace?.city?.replace(/市$/, "") || "待定出发点";
+  const firstDestination = input.firstDestination?.trim() || input.firstDestinationPlace?.name || undefined;
   const startDate = input.startDate || new Date().toISOString().slice(0, 10);
   const endDate = input.endDate && input.endDate >= startDate ? input.endDate : startDate;
   return {
     ...input,
     title,
     destination,
+    firstDestination,
     startDate,
     endDate,
     notes: input.notes?.trim() || undefined,
-    companions: input.companions?.map((item) => item.trim()).filter(Boolean) ?? [],
-    preferences: input.preferences?.map((item) => item.trim()).filter(Boolean) ?? []
+    companions: input.companions?.map((item) => item.trim()).filter(Boolean) ?? []
   };
 }
 
@@ -1788,26 +2079,28 @@ function HomePage({
   const [title, setTitle] = useState("杭州周末旅行");
   const [destination, setDestination] = useState("杭州");
   const [destinationPlace, setDestinationPlace] = useState<PlaceSearchItem | null>(null);
+  const [firstDestination, setFirstDestination] = useState("西湖");
+  const [firstDestinationPlace, setFirstDestinationPlace] = useState<PlaceSearchItem | null>(null);
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-07-03");
   const [budget, setBudget] = useState("1800");
-  const [companions, setCompanions] = useState("朋友");
-  const [preferences, setPreferences] = useState("慢节奏, 咖啡, citywalk");
   const [notes, setNotes] = useState("每天午后留出休息，避免连续跨区。");
 
   function submitTrip() {
     const selectedDestinationPlace = destinationPlace ? placeFromSearchItem(destinationPlace) : undefined;
     const destinationText = destinationPlace ? destinationTextFromSearchPlace(destinationPlace) : destination.trim();
+    const selectedFirstDestinationPlace = firstDestinationPlace ? placeFromSearchItem(firstDestinationPlace) : undefined;
+    const firstDestinationText = firstDestinationPlace ? destinationTextFromSearchPlace(firstDestinationPlace) : firstDestination.trim();
     if (!destinationText && !selectedDestinationPlace) return;
     void onCreateTrip({
       title,
       destination: destinationText,
       destinationPlace: selectedDestinationPlace,
+      firstDestination: firstDestinationText,
+      firstDestinationPlace: selectedFirstDestinationPlace,
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
-      companions: parsePreferenceText(companions),
-      preferences: parsePreferenceText(preferences),
       notes
     });
   }
@@ -1832,7 +2125,7 @@ function HomePage({
             Journey
           </h1>
           <p className="max-w-xl text-lg leading-8 text-muted-foreground">
-            把旅行风格沉淀成可分享的 Skill，再由旅行助手将天气、路线、景点和个人偏好融合到可编辑行程画布里。
+            把旅行风格沉淀成可分享的 Skill，再由旅行助手将天气、路线、景点和已保存记忆融合到可编辑行程画布里。
           </p>
           <div className="flex flex-wrap gap-3">
             <Button onClick={() => onNavigate("workbench")}>
@@ -1855,10 +2148,10 @@ function HomePage({
                 <PoiSearchField
                   value={destination}
                   selectedPlace={destinationPlace ? placeFromSearchItem(destinationPlace) : null}
-                  city={destination}
-                  ariaLabel="目的地"
-                  placeholder="搜索城市、景区或商圈"
-                  selectionHint="可先创建行程，之后再从地图补地点。"
+                  city="全国"
+                  fieldLabel="出发点"
+                  ariaLabel="出发点"
+                  placeholder="搜索出发城市、车站、机场或酒店"
                   onQueryChange={(value) => {
                     setDestination(value);
                     setDestinationPlace(null);
@@ -1869,17 +2162,28 @@ function HomePage({
                   }}
                 />
               </div>
+              <div className="md:col-span-2">
+                <PoiSearchField
+                  value={firstDestination}
+                  selectedPlace={firstDestinationPlace ? placeFromSearchItem(firstDestinationPlace) : null}
+                  city="全国"
+                  fieldLabel="第一站"
+                  ariaLabel="第一个目的地"
+                  placeholder="搜索第一站、酒店、景点或餐厅"
+                  onQueryChange={(value) => {
+                    setFirstDestination(value);
+                    setFirstDestinationPlace(null);
+                  }}
+                  onSelect={(place) => {
+                    setFirstDestination(destinationTextFromSearchPlace(place));
+                    setFirstDestinationPlace(place);
+                  }}
+                />
+              </div>
               <Input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} aria-label="出发日期" />
               <Input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} aria-label="返回日期" />
               <Input value={budget} onChange={(event) => setBudget(event.target.value)} aria-label="预算" />
-              <Input value={companions} onChange={(event) => setCompanions(event.target.value)} aria-label="同行人" />
-              <Input value={preferences} onChange={(event) => setPreferences(event.target.value)} aria-label="偏好" />
-              <Textarea
-                value={notes}
-                onChange={(event) => setNotes(event.target.value)}
-                aria-label="行程备注"
-                className="min-h-20 md:col-span-2"
-              />
+              <Input value={notes} onChange={(event) => setNotes(event.target.value)} aria-label="行程备注" />
               <Button className="md:col-span-2" onClick={submitTrip} disabled={!destination.trim() && !destinationPlace}>
                 <MapPinned data-icon="inline-start" />
                 创建并规划
@@ -1914,11 +2218,11 @@ function NewTripDialog({
   const [title, setTitle] = useState("");
   const [destination, setDestination] = useState("");
   const [destinationPlace, setDestinationPlace] = useState<PlaceSearchItem | null>(null);
+  const [firstDestination, setFirstDestination] = useState("");
+  const [firstDestinationPlace, setFirstDestinationPlace] = useState<PlaceSearchItem | null>(null);
   const [startDate, setStartDate] = useState("2026-07-01");
   const [endDate, setEndDate] = useState("2026-07-03");
   const [budget, setBudget] = useState("");
-  const [companions, setCompanions] = useState("");
-  const [preferences, setPreferences] = useState("");
   const [notes, setNotes] = useState("");
   const endBeforeStart = Boolean(endDate && startDate && endDate < startDate);
 
@@ -1926,16 +2230,18 @@ function NewTripDialog({
     event.preventDefault();
     const selectedDestinationPlace = destinationPlace ? placeFromSearchItem(destinationPlace) : undefined;
     const destinationText = destinationPlace ? destinationTextFromSearchPlace(destinationPlace) : destination.trim();
+    const selectedFirstDestinationPlace = firstDestinationPlace ? placeFromSearchItem(firstDestinationPlace) : undefined;
+    const firstDestinationText = firstDestinationPlace ? destinationTextFromSearchPlace(firstDestinationPlace) : firstDestination.trim();
     if (!destinationText && !selectedDestinationPlace) return;
     void onCreateTrip({
       title,
       destination: destinationText,
       destinationPlace: selectedDestinationPlace,
+      firstDestination: firstDestinationText,
+      firstDestinationPlace: selectedFirstDestinationPlace,
       startDate,
       endDate,
       budgetCny: Number(budget) || undefined,
-      companions: parsePreferenceText(companions),
-      preferences: parsePreferenceText(preferences),
       notes
     });
   }
@@ -1952,7 +2258,7 @@ function NewTripDialog({
         <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
           <div className="min-w-0">
             <h3 className="text-lg font-black">新建行程</h3>
-            <p className="mt-1 text-sm text-muted-foreground">先确定目的地和日期，之后在画布中补地点、路线和预算。</p>
+            <p className="mt-1 text-sm text-muted-foreground">先确定出发点、第一站和日期，之后在画布中跨城市补地点、路线和预算。</p>
           </div>
           <Button type="button" variant="ghost" size="icon" className="shrink-0" onClick={onClose} aria-label="关闭新建行程">
             <X />
@@ -1967,10 +2273,10 @@ function NewTripDialog({
             <PoiSearchField
               value={destination}
               selectedPlace={destinationPlace ? placeFromSearchItem(destinationPlace) : null}
-              city={destination}
-              ariaLabel="新建行程目的地"
-              placeholder="搜索城市、景区或商圈"
-              selectionHint="可先创建行程，之后再从地图补地点。"
+              city="全国"
+              fieldLabel="出发点"
+              ariaLabel="新建行程出发点"
+              placeholder="搜索出发城市、车站、机场或酒店"
               onQueryChange={(value) => {
                 setDestination(value);
                 setDestinationPlace(null);
@@ -1978,6 +2284,24 @@ function NewTripDialog({
               onSelect={(place) => {
                 setDestination(destinationTextFromSearchPlace(place));
                 setDestinationPlace(place);
+              }}
+            />
+          </div>
+          <div className="md:col-span-2">
+            <PoiSearchField
+              value={firstDestination}
+              selectedPlace={firstDestinationPlace ? placeFromSearchItem(firstDestinationPlace) : null}
+              city="全国"
+              fieldLabel="第一站"
+              ariaLabel="新建行程第一个目的地"
+              placeholder="搜索第一站、酒店、景点或餐厅"
+              onQueryChange={(value) => {
+                setFirstDestination(value);
+                setFirstDestinationPlace(null);
+              }}
+              onSelect={(place) => {
+                setFirstDestination(destinationTextFromSearchPlace(place));
+                setFirstDestinationPlace(place);
               }}
             />
           </div>
@@ -1994,27 +2318,8 @@ function NewTripDialog({
             <Input value={budget} onChange={(event) => setBudget(event.target.value)} aria-label="新建行程预算" placeholder="例如：1800" />
           </label>
           <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-            同行人
-            <Input value={companions} onChange={(event) => setCompanions(event.target.value)} aria-label="新建行程同行人" placeholder="例如：家人, 孩子" />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-            旅行偏好
-            <Input
-              value={preferences}
-              onChange={(event) => setPreferences(event.target.value)}
-              aria-label="新建行程偏好"
-              placeholder="例如：慢节奏, 博物馆, 少走路"
-            />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground md:col-span-2">
             行程备注
-            <Textarea
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              aria-label="新建行程备注"
-              className="min-h-24"
-              placeholder="例如：每天午后休息，避免连续跨区"
-            />
+            <Input value={notes} onChange={(event) => setNotes(event.target.value)} aria-label="新建行程备注" placeholder="例如：午后休息" />
           </label>
           {endBeforeStart && (
             <p className="rounded-2xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 md:col-span-2">
@@ -2133,7 +2438,7 @@ function Sidebar({
                         )}
                       </span>
                       <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
-                        {item.destination} · {compactDateRange(item)} · {item.days.length} 天
+                        出发点 {item.destination} · {compactDateRange(item)} · {item.days.length} 天
                         {duplicateTitle ? " · 同名行程" : ""}
                       </span>
                       <span className="mt-1 block truncate text-[11px] font-semibold text-muted-foreground/80">
@@ -2181,7 +2486,7 @@ function Sidebar({
           >
             <span className="block truncate font-black">{itinerary.title}</span>
             <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
-              {itinerary.destination} · {compactDateRange(itinerary)} · {itinerary.days.length} 天
+              出发点 {itinerary.destination} · {compactDateRange(itinerary)} · {itinerary.days.length} 天
             </span>
             <span className="mt-2 inline-flex rounded-full bg-[#f6f6f3] px-2.5 py-1 text-[11px] font-black text-foreground">
               回到画布
@@ -2190,6 +2495,302 @@ function Sidebar({
         </div>
       )}
     </aside>
+  );
+}
+
+function TravelResultPage({
+  itinerary,
+  exportText,
+  onBackToWorkbench
+}: {
+  itinerary: TravelItinerary;
+  exportText: string;
+  onBackToWorkbench: () => void;
+}) {
+  const [copyStatus, setCopyStatus] = useState("");
+  const checklist = summarizePlanningChecklist(itinerary);
+  const activities = itinerary.days.flatMap((day) => day.activities);
+  const routePairs = itinerary.days.flatMap((day) => getRoutePairsForDay(itinerary, day));
+  const plannedLegs = routePairs.flatMap((pair) => (pair.leg ? [pair.leg] : []));
+  const totalDistanceMeters = plannedLegs.reduce((sum, leg) => sum + leg.distanceMeters, 0);
+  const totalDurationMinutes = plannedLegs.reduce((sum, leg) => sum + leg.durationMinutes, 0);
+  const plannedBudget = activities.reduce((sum, activity) => sum + (activity.budgetCny ?? 0), 0);
+  const overviewItems = [
+    `${itinerary.days.length} 天`,
+    `${activities.length} 项安排`,
+    plannedLegs.length > 0 ? `${plannedLegs.length} 段路线` : undefined,
+    totalDistanceMeters > 0 ? formatDistanceForUi(totalDistanceMeters) : undefined,
+    totalDurationMinutes > 0 ? `${totalDurationMinutes} 分钟交通` : undefined,
+    plannedBudget > 0 ? `活动预算约 ${plannedBudget} 元` : itinerary.budgetCny ? `总预算 ${itinerary.budgetCny} 元` : undefined
+  ].filter(Boolean);
+  const markdownReady = exportText.trim().length > 0;
+
+  async function copyMarkdown() {
+    if (!markdownReady) return;
+    try {
+      await navigator.clipboard?.writeText(exportText);
+      setCopyStatus("已复制");
+    } catch {
+      setCopyStatus("复制失败");
+    }
+  }
+
+  function downloadMarkdown() {
+    if (!markdownReady) return;
+    downloadTextFile(exportText, `${sanitizeFilename(itinerary.title)}-${itinerary.startDate}.md`);
+  }
+
+  return (
+    <div className="min-h-screen bg-[#fbfbf9]">
+      <header className="border-b border-border bg-white px-4 py-3 md:px-8 md:py-5">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs font-black uppercase tracking-normal text-muted-foreground">旅行结果</p>
+            <h2 className="mt-1 text-xl font-black md:text-2xl">旅行结果</h2>
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Button type="button" variant="outline" size="sm" className="rounded-full bg-white" onClick={onBackToWorkbench}>
+              <Pencil data-icon="inline-start" />
+              返回编辑
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="rounded-full bg-white"
+              onClick={() => void copyMarkdown()}
+              disabled={!markdownReady}
+              aria-label="复制导出 Markdown"
+            >
+              <Copy data-icon="inline-start" />
+              {copyStatus || "复制"}
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="rounded-full"
+              onClick={downloadMarkdown}
+              disabled={!markdownReady}
+              aria-label="重新下载 Markdown"
+            >
+              <Download data-icon="inline-start" />
+              重新下载
+            </Button>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto grid max-w-6xl gap-5 px-4 py-5 md:px-8 md:py-8">
+        <section aria-label="只读行程结果" className="overflow-hidden rounded-2xl border border-border bg-white shadow-sm">
+          <div className="grid gap-5 border-b border-border p-5 md:grid-cols-[minmax(0,1fr)_auto] md:items-start md:p-6">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className="bg-[#f6f6f3] text-foreground">只读</Badge>
+                <span className="text-sm font-semibold text-muted-foreground">
+                  {itinerary.startDate} 至 {itinerary.endDate ?? itinerary.startDate}
+                </span>
+              </div>
+              <h1 className="mt-3 text-2xl font-black md:text-4xl">{itinerary.title}</h1>
+              <p className="mt-2 text-sm font-semibold text-muted-foreground md:text-base">
+                出发点 {itinerary.destination}
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2 md:max-w-md md:justify-end">
+              {overviewItems.map((item) => (
+                <span key={item} className="inline-flex min-h-8 items-center rounded-full bg-[#f6f6f3] px-3 text-xs font-black text-foreground md:text-sm">
+                  {item}
+                </span>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid gap-5 bg-[#fbfbf9] p-5 md:p-6">
+            <section
+              aria-label="导出检查"
+              className={cn(
+                "rounded-2xl border bg-white p-4",
+                checklist.complete ? "border-emerald-200" : "border-amber-300"
+              )}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-base font-black">导出检查</h2>
+                <Badge className={checklist.complete ? "bg-emerald-600 text-white" : "bg-amber-100 text-amber-950"}>
+                  {checklist.complete ? "可归档" : "待补齐"}
+                </Badge>
+              </div>
+              <p className="mt-2 text-sm font-semibold text-muted-foreground">
+                {checklist.complete ? "地点、时间和相邻交通已补齐" : `还有 ${checklist.total} 项需要补齐`}
+              </p>
+              {!checklist.complete && (
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  {checklist.missingPlaces.length > 0 && (
+                    <div className="rounded-xl bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+                      <p className="font-black">地点</p>
+                      <ul className="mt-2 grid gap-1 leading-5">
+                        {checklist.missingPlaceItems.map((item) => (
+                          <li key={`place-${item.activityId}`}>{item.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {checklist.missingTimes.length > 0 && (
+                    <div className="rounded-xl bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+                      <p className="font-black">时间</p>
+                      <ul className="mt-2 grid gap-1 leading-5">
+                        {checklist.missingTimeItems.map((item) => (
+                          <li key={`time-${item.activityId}`}>{item.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {checklist.pendingTransport.length > 0 && (
+                    <div className="rounded-xl bg-amber-50 p-3 text-xs font-semibold text-amber-950">
+                      <p className="font-black">交通</p>
+                      <ul className="mt-2 grid gap-1 leading-5">
+                        {checklist.pendingTransportItems.map((item) => (
+                          <li key={`transport-${item.fromActivityId}-${item.toActivityId}`}>{item.label}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section aria-label="每日安排" className="grid gap-4">
+              {itinerary.days.map((day) => {
+                const dayRoutePairs = getRoutePairsForDay(itinerary, day);
+                return (
+                  <article key={day.id} className="overflow-hidden rounded-2xl border border-border bg-white">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
+                      <div className="min-w-0">
+                        <h2 className="text-lg font-black">{day.title}</h2>
+                        <p className="mt-1 text-xs font-semibold text-muted-foreground">
+                          {day.date}
+                          {day.weather ? ` · ${day.weather.weather} ${formatTemperatureForUi(day.weather.temperature)}` : ""}
+                        </p>
+                      </div>
+                      <Badge className="bg-[#f6f6f3] text-foreground">{day.activities.length} 项安排</Badge>
+                    </div>
+                    <ol className="grid gap-3 p-4">
+                      {day.activities.length === 0 && (
+                        <li className="rounded-xl border border-dashed border-border bg-[#fbfbf9] p-4 text-sm font-semibold text-muted-foreground">
+                          这一天还没有安排
+                        </li>
+                      )}
+                      {day.activities.map((activity, index) => {
+                        const summary = activitySummaryView(activity, index);
+                        const routePair = dayRoutePairs.find(
+                          (pair) => pair.fromActivity.id === activity.id && pair.toActivity.id === day.activities[index + 1]?.id
+                        );
+                        return (
+                          <li key={activity.id} className="grid gap-3">
+                            <div className="rounded-xl border border-border bg-[#fbfbf9] p-4">
+                              <div className="flex flex-wrap items-start justify-between gap-3">
+                                <div className="flex min-w-0 gap-3">
+                                  <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-foreground text-sm font-black text-background">
+                                    {index + 1}
+                                  </span>
+                                  <div className="min-w-0">
+                                    <h3 className="text-base font-black md:text-lg">{summary.displayName}</h3>
+                                    <div className="mt-2 flex flex-wrap gap-2">
+                                      <Badge className="bg-white text-foreground">{summary.typeLabel}</Badge>
+                                      {summary.time && <Badge className="bg-white text-foreground">{summary.time}</Badge>}
+                                      {summary.budget && <Badge className="bg-white text-foreground">{summary.budget}</Badge>}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                              {(summary.place || activity.description || activity.note) && (
+                                <div className="mt-3 grid gap-2 border-t border-border pt-3 text-sm font-semibold text-muted-foreground">
+                                  {summary.place && (
+                                    <p className="flex items-center gap-2">
+                                      <MapPin className="size-4" />
+                                      <span>{summary.place}</span>
+                                    </p>
+                                  )}
+                                  {activity.description && <p>{activity.description}</p>}
+                                  {activity.note && <p>{activity.note}</p>}
+                                </div>
+                              )}
+                            </div>
+                            {routePair && (
+                              <ReadOnlyRouteResult
+                                from={routePair.fromActivity}
+                                to={routePair.toActivity}
+                                fromIndex={routePair.fromIndex}
+                                toIndex={routePair.toIndex}
+                                leg={routePair.leg}
+                              />
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </article>
+                );
+              })}
+            </section>
+          </div>
+        </section>
+
+        {markdownReady && (
+          <section aria-label="导出预览" className="rounded-2xl border border-border bg-white p-5 shadow-sm md:p-6">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="text-lg font-black">导出预览</h2>
+              <Badge className="bg-[#f6f6f3] text-foreground">Markdown</Badge>
+            </div>
+            <pre className="mt-4 max-h-96 overflow-auto rounded-2xl bg-[#f6f6f3] p-4 text-xs leading-6">
+              {exportText}
+            </pre>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}
+
+function ReadOnlyRouteResult({
+  from,
+  to,
+  fromIndex,
+  toIndex,
+  leg
+}: {
+  from: Activity;
+  to: Activity;
+  fromIndex: number;
+  toIndex: number;
+  leg?: TransportLeg;
+}) {
+  const title = activityRouteName(from, to, fromIndex, toIndex);
+  const provider = leg ? transportProviderMeta(leg) : undefined;
+  const modeLabel = leg ? routeModeOptions.find(([value]) => value === leg.mode)?.[1] : undefined;
+  return (
+    <div className="ml-4 rounded-xl border border-border bg-white p-4 text-sm shadow-sm md:ml-12">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border bg-[#f6f6f3]">
+          <Route className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <p className="text-xs font-black text-muted-foreground">路线</p>
+          <h4 className="font-black">{title}</h4>
+        </div>
+      </div>
+      {leg ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {provider && <Badge className={provider.className}>{provider.label}</Badge>}
+          <Badge className="bg-[#f6f6f3] text-foreground">
+            {formatDistanceForUi(leg.distanceMeters)} / {leg.durationMinutes} 分钟
+          </Badge>
+          {modeLabel && <Badge className="bg-[#f6f6f3] text-foreground">{modeLabel}</Badge>}
+          {leg.summary && <span className="text-xs font-semibold text-muted-foreground">{leg.summary}</span>}
+        </div>
+      ) : (
+        <p className="mt-3 text-xs font-semibold text-muted-foreground">路线待确认</p>
+      )}
+    </div>
   );
 }
 
@@ -2280,9 +2881,7 @@ function activityDraftFromSearchPlace(place: PlaceSearchItem): ActivityDraft {
 }
 
 function destinationTextFromSearchPlace(place: PlaceSearchItem): string {
-  const city = place.city.trim();
-  if (city) return city.replace(/市$/, "");
-  return place.name.trim();
+  return place.name.trim() || place.city.trim().replace(/市$/, "");
 }
 
 function amapPoiItems(items: PlaceSearchItem[]): PlaceSearchItem[] {
@@ -2294,26 +2893,6 @@ function amapPoiItems(items: PlaceSearchItem[]): PlaceSearchItem[] {
   );
 }
 
-function createLocalPoiFallback(keywords: string, city: string): PlaceSearchItem[] {
-  const normalizedKeywords = keywords.trim();
-  if (!normalizedKeywords) return [];
-  const normalizedCity = city.trim().replace(/市$/, "") || "杭州";
-  return [
-    {
-      id: `local-${normalizedCity}-${normalizedKeywords}`,
-      name: normalizedKeywords,
-      address: `${normalizedCity}市核心区域`,
-      city: normalizedCity,
-      district: `${normalizedCity}市`,
-      type: /咖啡|餐厅|饭店|美食|茶/.test(normalizedKeywords) ? "餐饮服务" : "风景名胜",
-      openingHours: /咖啡|餐厅|饭店|美食|茶/.test(normalizedKeywords) ? "10:00-22:00" : "09:00-17:30",
-      averageCostCny: /咖啡|茶/.test(normalizedKeywords) ? 45 : undefined,
-      source: "mock",
-      location: { lng: 120.1551, lat: 30.2741 }
-    }
-  ];
-}
-
 function placeAddressLine(place: Pick<Place, "address" | "city" | "district">): string {
   return [place.district, place.address].filter(Boolean).join(" · ") || place.city || "高德地点";
 }
@@ -2322,6 +2901,7 @@ function PoiSearchField({
   value,
   selectedPlace,
   city,
+  fieldLabel,
   ariaLabel,
   placeholder,
   selectionHint,
@@ -2332,6 +2912,7 @@ function PoiSearchField({
   value: string;
   selectedPlace?: Place | null;
   city?: string;
+  fieldLabel?: string;
   ariaLabel: string;
   placeholder?: string;
   selectionHint?: string;
@@ -2342,6 +2923,7 @@ function PoiSearchField({
   const [results, setResults] = useState<PlaceSearchItem[]>([]);
   const [status, setStatus] = useState("");
   const [searching, setSearching] = useState(false);
+  const inputId = useId();
 
   useEffect(() => {
     setResults([]);
@@ -2359,10 +2941,7 @@ function PoiSearchField({
     setResults([]);
     setStatus("正在搜索高德地点...");
     try {
-      const result = await apiGet<{ items: PlaceSearchItem[] }>(
-        `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(city?.trim() || "全国")}`,
-        { items: createLocalPoiFallback(query, city?.trim() || "杭州") }
-      );
+      const result = await apiGet<{ items: PlaceSearchItem[] }>(`/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(city?.trim() || "全国")}`);
       const concreteItems = amapPoiItems(result.items);
       setResults(concreteItems);
       setStatus(
@@ -2372,6 +2951,8 @@ function PoiSearchField({
             ? "地图服务没有返回可用的高德地点，请换个关键词。"
             : "没有找到高德地点，请换个关键词。"
       );
+    } catch (error) {
+      setStatus(readApiRequestErrorMessage(error, "高德地点搜索失败，请稍后重试。"));
     } finally {
       setSearching(false);
     }
@@ -2385,8 +2966,14 @@ function PoiSearchField({
 
   return (
     <div className={cn("grid gap-2", className)}>
+      {fieldLabel && (
+        <label className="text-xs font-bold text-muted-foreground" htmlFor={inputId}>
+          {fieldLabel}
+        </label>
+      )}
       <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto]">
         <Input
+          id={inputId}
           value={value}
           onChange={(event) => onQueryChange(event.target.value)}
           onKeyDown={(event) => {
@@ -2549,10 +3136,10 @@ function Workbench({
   }, [day.activities, selectedActivityId]);
 
   useEffect(() => {
-    if (selectedTransportLegId && !(day.transportLegs ?? []).some((leg) => leg.id === selectedTransportLegId)) {
+    if (selectedTransportLegId && !getAdjacentTransportLegs(day, itinerary).some((leg) => leg.id === selectedTransportLegId)) {
       setSelectedTransportLegId(null);
     }
-  }, [day.transportLegs, selectedTransportLegId]);
+  }, [day, itinerary, selectedTransportLegId]);
 
   useEffect(() => {
     if (!focusTarget || focusTarget.dayId !== day.id) return;
@@ -2562,12 +3149,12 @@ function Workbench({
       onFocusTargetConsumed();
       return;
     }
-    if (focusTarget.transportLegId && (day.transportLegs ?? []).some((leg) => leg.id === focusTarget.transportLegId)) {
+    if (focusTarget.transportLegId && getAdjacentTransportLegs(day, itinerary).some((leg) => leg.id === focusTarget.transportLegId)) {
       setSelectedActivityId(null);
       setSelectedTransportLegId(focusTarget.transportLegId);
       onFocusTargetConsumed();
     }
-  }, [day.activities, day.id, day.transportLegs, focusTarget, onFocusTargetConsumed]);
+  }, [day, itinerary, focusTarget, onFocusTargetConsumed]);
 
   const dayHasWeatherAnchor = day.activities.some(
     (activity) => hasMapPoint(activity) || Boolean(activity.placeName?.trim() || activity.place?.name?.trim())
@@ -2584,16 +3171,11 @@ function Workbench({
   useEffect(() => {
     if (!backgroundSyncEnabled) return;
     const pendingRoutePairs = itinerary.days.flatMap((candidateDay) =>
-      candidateDay.activities.slice(0, -1).flatMap((activity, index) => {
-        const next = candidateDay.activities[index + 1];
-        if (!next || !canRouteActivityPair(activity, next)) return [];
-        const exists = (candidateDay.transportLegs ?? []).some(
-          (leg) => leg.fromActivityId === activity.id && leg.toActivityId === next.id
-        );
-        return exists
+      getRoutePairsForDay(itinerary, candidateDay).flatMap((pair) =>
+        pair.leg
           ? []
-          : [`${candidateDay.id}:${routeEndpointFingerprint(activity)}:${routeEndpointFingerprint(next)}`];
-      })
+          : [`${candidateDay.id}:${routeEndpointFingerprint(pair.fromActivity)}:${routeEndpointFingerprint(pair.toActivity)}`]
+      )
     );
     if (pendingRoutePairs.length === 0) return;
     const fingerprint = pendingRoutePairs.join("|");
@@ -2603,6 +3185,9 @@ function Workbench({
   }, [backgroundSyncEnabled, itinerary.days, onCompleteRoutes]);
 
   const dayBudget = day.activities.reduce((sum, activity) => sum + (activity.budgetCny ?? 0), 0);
+  const dayRoutePairs = getRoutePairsForDay(itinerary, day);
+  const overnightStart = getOvernightStartAnchor(itinerary, day);
+  const overnightRoutePair = dayRoutePairs.find((pair) => pair.overnightStart);
   const daySummary = [
     day.date,
     `${day.activities.length} 项安排`,
@@ -2613,25 +3198,21 @@ function Workbench({
   const selectedActivityIndex = day.activities.findIndex((activity) => activity.id === selectedActivityId);
   const selectedActivity = selectedActivityIndex >= 0 ? day.activities[selectedActivityIndex] : undefined;
   const selectedTransportContext = selectedTransportLegId
-    ? day.activities.slice(0, -1).flatMap((fromActivity, index) => {
-        const toActivity = day.activities[index + 1]!;
-        const leg = (day.transportLegs ?? []).find(
-          (candidate) => candidate.fromActivityId === fromActivity.id && candidate.toActivityId === toActivity.id
-        );
-        return leg && leg.id === selectedTransportLegId
+    ? getRoutePairsForDay(itinerary, day).flatMap((pair) => {
+        return pair.leg && pair.leg.id === selectedTransportLegId
           ? [
               {
-                fromActivity,
-                toActivity,
-                fromIndex: index,
-                toIndex: index + 1,
-                leg
+                fromActivity: pair.fromActivity,
+                toActivity: pair.toActivity,
+                fromIndex: pair.fromIndex,
+                toIndex: pair.toIndex,
+                leg: pair.leg
               }
             ]
           : [];
       })[0]
     : undefined;
-  const dayRouteCount = getAdjacentTransportLegs(day).length;
+  const dayRouteCount = getAdjacentTransportLegs(day, itinerary).length;
   const dayMissingPlaceCount = day.activities.filter((activity) => !hasMapPoint(activity)).length;
   const exportChecklist = useMemo(() => summarizePlanningChecklist(itinerary), [itinerary]);
 
@@ -2690,6 +3271,13 @@ function Workbench({
   function selectDestinationPlace(place: PlaceSearchItem) {
     setDestinationText(destinationTextFromSearchPlace(place));
     setDestinationPlaceDraft(placeFromSearchItem(place));
+  }
+
+  function selectRouteEndpoint(pair: DayRoutePair, activityId: string) {
+    const targetDayId = activityId === pair.fromActivity.id ? pair.fromDayId : pair.toDayId;
+    if (targetDayId !== day.id) onSelectDay(targetDayId);
+    setSelectedActivityId(activityId);
+    setSelectedTransportLegId(null);
   }
 
   async function addPlaceToDay(place: PlaceSearchItem): Promise<TravelItinerary | void> {
@@ -2755,11 +3343,8 @@ function Workbench({
             <h2 className="truncate text-base font-black md:text-xl">{itinerary.title}</h2>
             <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground md:text-sm">
               <span className="min-w-0 truncate">
-                {itinerary.destination} / {itinerary.startDate} 至 {itinerary.endDate ?? itinerary.startDate} / {itinerary.days.length} 天
+                出发点 {itinerary.destination} / {itinerary.startDate} 至 {itinerary.endDate ?? itinerary.startDate} / {itinerary.days.length} 天
               </span>
-              {itinerary.companions.length > 0 && (
-                <span className="min-w-0 truncate">同行 {itinerary.companions.join("、")}</span>
-              )}
               <span className="inline-flex min-h-6 shrink-0 items-center gap-1.5 rounded-full bg-[#f6f6f3] px-2 text-[11px] font-bold text-muted-foreground md:text-xs" aria-live="polite">
                 <span className={cn("size-2 rounded-full", saveStatus.includes("正在") ? "bg-amber-500" : "bg-emerald-500")} />
                 {saveStatus}
@@ -2770,7 +3355,7 @@ function Workbench({
             <Button
               variant="outline"
               size="sm"
-            className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 2xl:hidden"
+              className="size-9 shrink-0 rounded-full bg-white p-0 sm:size-auto sm:px-3 min-[769px]:hidden"
               onClick={onOpenAgent}
               aria-label="打开旅行助手"
             >
@@ -2800,7 +3385,7 @@ function Workbench({
           </div>
         </div>
       </header>
-      <div data-testid="workbench-scroll" className="min-h-0 flex-1 overflow-auto px-4 py-4 md:px-6 md:py-5">
+      <div data-testid="workbench-scroll" className="min-h-0 flex-1 overflow-auto bg-[#fbfbf9] px-4 py-4 text-[#211922] md:px-6 md:py-5">
         {serviceStatus && <div className="mb-3 text-xs font-semibold text-muted-foreground">{serviceStatus}</div>}
         <MapPanel
           itinerary={itinerary}
@@ -2827,7 +3412,7 @@ function Workbench({
             <div>
               <CardTitle className="text-base">行程信息</CardTitle>
               <CardDescription className="mt-1 text-xs md:text-sm">
-                {itinerary.destination} · {itinerary.days.length} 天 · 预算 {itinerary.budgetCny ? `${itinerary.budgetCny} 元` : "待定"}
+                出发点 {itinerary.destination} · {itinerary.days.length} 天 · 预算 {itinerary.budgetCny ? `${itinerary.budgetCny} 元` : "待定"}
               </CardDescription>
             </div>
             <Button
@@ -2854,7 +3439,7 @@ function Workbench({
                 <div className="min-w-0">
                   <h3 className="text-lg font-black">编辑行程信息</h3>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {itinerary.destination} · {itinerary.startDate} 至 {itinerary.endDate ?? itinerary.startDate}
+                    出发点 {itinerary.destination} · {itinerary.startDate} 至 {itinerary.endDate ?? itinerary.startDate}
                   </p>
                 </div>
                 <Button
@@ -2875,14 +3460,14 @@ function Workbench({
                     <Input value={titleText} onChange={(event) => setTitleText(event.target.value)} aria-label="行程名称" />
                   </label>
                   <div className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-                    目的地
-                    <PoiSearchField
-                      value={destinationText}
-                      selectedPlace={destinationPlaceDraft}
-                      city={destinationText}
-                      ariaLabel="目的地"
-                      placeholder="搜索城市、景区或商圈"
-                      selectionHint="可直接保存目的地，之后再从地图补充地点。"
+	                    出发点
+	                    <PoiSearchField
+	                      value={destinationText}
+	                      selectedPlace={destinationPlaceDraft}
+	                      city="全国"
+	                      ariaLabel="出发点"
+	                      placeholder="搜索出发城市、车站、机场或酒店"
+	                      selectionHint="只用于确定出发位置，之后可以跨城市补地点。"
                       onQueryChange={updateDestinationText}
                       onSelect={selectDestinationPlace}
                     />
@@ -2942,7 +3527,47 @@ function Workbench({
           onAddDay={onAddDay}
           onAddActivity={() => void addBlankActivityFromCanvas()}
         />
-        <section className="mt-4 flex flex-col gap-4">
+        <section className="mt-4 flex flex-col gap-3">
+          {overnightStart && (
+            <OvernightStartCard
+              activity={overnightStart.activity}
+              onEdit={() => {
+                onSelectDay(overnightStart.day.id);
+                setSelectedActivityId(overnightStart.activity.id);
+                setSelectedTransportLegId(null);
+              }}
+            />
+          )}
+          {overnightRoutePair && (
+            <TransportLegEditor
+              leg={overnightRoutePair.leg}
+              from={overnightRoutePair.fromActivity}
+              to={overnightRoutePair.toActivity}
+              fromIndex={overnightRoutePair.fromIndex}
+              toIndex={overnightRoutePair.toIndex}
+              selected={Boolean(overnightRoutePair.leg && selectedTransportLegId === overnightRoutePair.leg.id)}
+              onFocus={() => {
+                setSelectedActivityId(null);
+                if (!overnightRoutePair.leg) setSelectedTransportLegId(null);
+              }}
+              onSelect={(legId) => {
+                setSelectedTransportLegId(legId);
+                setSelectedActivityId(null);
+              }}
+              onShowInMap={(legId) => {
+                setSelectedTransportLegId(legId);
+                setSelectedActivityId(null);
+                setMapRouteFocusRequest((current) => ({
+                  dayId: day.id,
+                  legId,
+                  nonce: (current?.nonce ?? 0) + 1
+                }));
+              }}
+              onEditEndpoint={(activityId) => selectRouteEndpoint(overnightRoutePair, activityId)}
+              onSave={(mode, overrides) => onSetTransport(day.id, overnightRoutePair.fromActivity.id, overnightRoutePair.toActivity.id, mode, overrides)}
+              onRemove={() => onRemoveTransport(day.id, overnightRoutePair.fromActivity.id, overnightRoutePair.toActivity.id)}
+            />
+          )}
           {day.activities.length === 0 ? (
             <Card>
               <CardHeader>
@@ -2953,12 +3578,11 @@ function Workbench({
           ) : (
             day.activities.map((activity, index) => {
               const next = day.activities[index + 1];
-              const leg = next
-                ? (day.transportLegs ?? []).find(
-                    (candidate) => candidate.fromActivityId === activity.id && candidate.toActivityId === next.id
-                  )
+              const routePair = next
+                ? dayRoutePairs.find((pair) => !pair.overnightStart && pair.fromActivity.id === activity.id && pair.toActivity.id === next.id)
                 : undefined;
-              const showTransportLeg = Boolean(next && (leg || canRouteActivityPair(activity, next)));
+              const leg = routePair?.leg;
+              const showTransportLeg = Boolean(routePair);
               return (
                 <div key={activity.id} className="flex flex-col gap-3">
                   <ActivityEditor
@@ -2989,7 +3613,6 @@ function Workbench({
                     <ActivityDetailsPanel
                       activity={activity}
                       index={index}
-                      destination={itinerary.destination}
                       dayOptions={itinerary.days}
                       currentDayId={day.id}
                       onChange={(changes) => onUpdateActivity(activity.id, changes)}
@@ -3001,13 +3624,13 @@ function Workbench({
                       }}
                     />
                   )}
-                  {next && showTransportLeg && (
+                  {next && routePair && showTransportLeg && (
                     <TransportLegEditor
                       leg={leg}
                       from={activity}
                       to={next}
-                      fromIndex={index}
-                      toIndex={index + 1}
+                      fromIndex={routePair.fromIndex}
+                      toIndex={routePair.toIndex}
                       selected={Boolean(leg && selectedTransportLegId === leg.id)}
                       onFocus={() => {
                         setSelectedActivityId(null);
@@ -3026,10 +3649,7 @@ function Workbench({
                           nonce: (current?.nonce ?? 0) + 1
                         }));
                       }}
-                      onEditEndpoint={(activityId) => {
-                        setSelectedActivityId(activityId);
-                        setSelectedTransportLegId(null);
-                      }}
+                      onEditEndpoint={(activityId) => selectRouteEndpoint(routePair, activityId)}
                       onSave={(mode, overrides) => onSetTransport(day.id, activity.id, next.id, mode, overrides)}
                       onRemove={() => onRemoveTransport(day.id, activity.id, next.id)}
                     />
@@ -3187,7 +3807,7 @@ function DayContextBar({
   onAddDay: (position?: "after" | "before") => void;
   onAddActivity: () => void;
 }) {
-  const routablePairCount = countRoutableAdjacentPairs(day);
+  const routablePairCount = countRoutableAdjacentPairs(day, itinerary);
   const routeSummary = routablePairCount > 0 ? `${dayRouteCount}/${routablePairCount} 段路线` : "暂无路线";
   const selectedRouteName = selectedTransportContext
     ? activityRouteName(
@@ -3218,13 +3838,13 @@ function DayContextBar({
       role="navigation"
       aria-label="行程日期和当前编辑上下文"
       data-testid="day-context-bar"
-      className="sticky top-0 z-30 mt-3 -mx-4 border-y border-border bg-white/95 px-4 py-2.5 shadow-[0_1px_0_rgba(0,0,0,0.04)] backdrop-blur md:mt-5 md:-mx-6 md:px-6 md:py-3"
+      className="mt-3 -mx-4 border-y border-[#dadad3] bg-white px-4 py-2.5 md:mt-5 md:-mx-6 md:px-6 md:py-3"
     >
-      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
-        <div className="min-w-0">
+      <div className="flex w-full max-w-full flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0 w-fit max-w-full">
           {useCompactDayPicker && (
             <select
-              className="min-h-10 w-full rounded-full border border-input bg-[#f6f6f3] px-3 text-sm font-black outline-none focus-visible:ring-2 focus-visible:ring-ring sm:hidden"
+              className="h-10 min-h-10 w-full rounded-full border border-input bg-[#f6f6f3] px-3 text-sm font-black outline-none focus-visible:ring-2 focus-visible:ring-ring sm:hidden"
               value={day.id}
               onChange={(event) => onSelectDay(event.target.value)}
               aria-label="选择日期"
@@ -3238,7 +3858,7 @@ function DayContextBar({
           )}
           <TabsList
             className={cn(
-              "min-w-0 max-w-full snap-x overflow-x-auto whitespace-nowrap rounded-full bg-[#f6f6f3] p-1",
+              "h-10 min-w-0 w-fit max-w-full snap-x overflow-x-auto whitespace-nowrap rounded-full bg-[#f6f6f3] p-0.5",
               useCompactDayPicker ? "hidden sm:flex" : "flex"
             )}
           >
@@ -3246,7 +3866,10 @@ function DayContextBar({
               <TabsTrigger
                 key={candidate.id}
                 active={candidate.id === day.id}
-                className="shrink-0 snap-start"
+                className={cn(
+                  "h-9 min-h-9 shrink-0 snap-start",
+                  candidate.id === day.id && "bg-primary text-primary-foreground"
+                )}
                 onClick={() => onSelectDay(candidate.id)}
               >
                 {candidate.title}
@@ -3254,16 +3877,16 @@ function DayContextBar({
             ))}
           </TabsList>
         </div>
-        <div className="flex min-w-0 flex-wrap items-center justify-start gap-1.5 lg:justify-end">
-          <Button type="button" variant="outline" size="sm" className="size-9 rounded-full p-0 md:size-auto md:px-3" onClick={() => onAddDay("before")} aria-label="前加一天">
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+          <Button type="button" variant="outline" size="sm" className="size-10 h-10 min-h-10 shrink-0 rounded-full p-0 min-[480px]:size-auto min-[480px]:px-3" onClick={() => onAddDay("before")} aria-label="前加一天">
             <CalendarPlus />
-            <span className="hidden md:inline">前加一天</span>
+            <span className="hidden min-[480px]:inline">前加一天</span>
           </Button>
-          <Button type="button" variant="outline" size="sm" className="size-9 rounded-full p-0 md:size-auto md:px-3" onClick={() => onAddDay("after")} aria-label="后加一天">
+          <Button type="button" variant="outline" size="sm" className="size-10 h-10 min-h-10 shrink-0 rounded-full p-0 min-[480px]:size-auto min-[480px]:px-3" onClick={() => onAddDay("after")} aria-label="后加一天">
             <CalendarPlus />
-            <span className="hidden md:inline">后加一天</span>
+            <span className="hidden min-[480px]:inline">后加一天</span>
           </Button>
-          <Button type="button" variant="secondary" size="sm" className="rounded-full px-3" onClick={onAddActivity} aria-label="添加活动">
+          <Button type="button" size="sm" className="h-10 min-h-10 rounded-full px-4" onClick={onAddActivity} aria-label="添加活动">
             <Plus data-icon="inline-start" />
             <span className="hidden sm:inline">添加活动</span>
             <span className="sm:hidden">添加</span>
@@ -3272,38 +3895,33 @@ function DayContextBar({
       </div>
       <div
         className={cn(
-          "mt-2 gap-2 lg:mt-3",
-          hasSelectedCanvasContext
-            ? "grid lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.75fr)] lg:items-center"
-            : "flex flex-wrap items-center justify-between"
+          "mt-3 grid gap-2",
+          hasSelectedCanvasContext && "min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(260px,0.62fr)] min-[1180px]:items-stretch"
         )}
       >
-        <div
-          className={cn(
-            "flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-1",
-            !hasSelectedCanvasContext && "flex-1"
-          )}
-        >
+        <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="text-lg font-black md:text-xl">{day.title}</h3>
             {day.weather && (
-              <span className="inline-flex min-h-7 items-center gap-1.5 rounded-full bg-[#f6f6f3] px-2.5 text-xs font-bold">
+              <span className="inline-flex min-h-7 items-center gap-1.5 rounded-full border border-[#e5e5e0] bg-[#f6f6f3] px-2.5 text-xs font-bold text-[#33332e]">
                 <CloudSun className="size-3.5" />
                 {day.weather.weather}
                 <span className="text-muted-foreground">{formatTemperatureForUi(day.weather.temperature)}</span>
               </span>
             )}
-          </div>
-          <p className="min-w-[220px] flex-1 text-right text-xs font-semibold text-muted-foreground md:text-sm">
             {[daySummary, routeSummary, dayMissingPlaceCount > 0 ? `${dayMissingPlaceCount} 项缺地点` : undefined]
               .filter(Boolean)
-              .join(" · ")}
-          </p>
+              .map((item) => (
+                <span key={item} className="inline-flex min-h-7 items-center rounded-full border border-[#e5e5e0] bg-[#f6f6f3] px-2.5 text-xs font-bold text-[#33332e]">
+                  {item}
+                </span>
+              ))}
+          </div>
         </div>
         {hasSelectedCanvasContext && (
         <div
           data-testid="selected-canvas-context"
-          className="min-w-0 rounded-2xl bg-[#f6f6f3] px-3 py-2 text-sm"
+          className="grid min-w-0 gap-1 rounded-2xl border border-[#e5e5e0] bg-white px-3 py-2 text-sm"
         >
           {selectedActivityTitle ? (
             <>
@@ -3399,21 +4017,24 @@ function MapPanel({
     ? points.filter(({ day: pointDay, activity, index }) => activityMatchesMapFilter(activity, index, pointDay, normalizedMapFilter))
     : points;
   const searchPreviewPoints = mapExpanded ? mapSearchResults.filter((place) => place.location) : [];
-  const legs = visibleDays.flatMap((visibleDay) => getAdjacentTransportLegs(visibleDay));
+  const legs = visibleDays.flatMap((visibleDay) => getAdjacentTransportLegs(visibleDay, itinerary));
   const routeSegmentsForDay = (targetDay: ItineraryDay) =>
-    targetDay.activities.slice(0, -1).flatMap((fromActivity, index) => {
-      const toActivity = targetDay.activities[index + 1]!;
-      const leg = (targetDay.transportLegs ?? []).find(
-        (candidate) => candidate.fromActivityId === fromActivity.id && candidate.toActivityId === toActivity.id
-      );
-      if (!leg && !canRouteActivityPair(fromActivity, toActivity)) return [];
-      return [{ day: targetDay, fromActivity, toActivity, leg, fromIndex: index, toIndex: index + 1 }];
-    });
+    getRoutePairsForDay(itinerary, targetDay).map((pair) => ({
+      day: targetDay,
+      fromActivity: pair.fromActivity,
+      toActivity: pair.toActivity,
+      leg: pair.leg,
+      fromIndex: pair.fromIndex,
+      toIndex: pair.toIndex,
+      fromDayId: pair.fromDayId,
+      toDayId: pair.toDayId,
+      overnightStart: pair.overnightStart
+    }));
   const allRouteSegments = visibleDays.flatMap((visibleDay) => routeSegmentsForDay(visibleDay));
   const routeSegments = mapScope === "day" ? routeSegmentsForDay(day) : [];
   const pendingLegCount = visibleDays.reduce((sum, visibleDay) => {
-    const expectedLegs = countRoutableAdjacentPairs(visibleDay);
-    return sum + Math.max(0, expectedLegs - getAdjacentTransportLegs(visibleDay).length);
+    const expectedLegs = countRoutableAdjacentPairs(visibleDay, itinerary);
+    return sum + Math.max(0, expectedLegs - getAdjacentTransportLegs(visibleDay, itinerary).length);
   }, 0);
   const unplacedActivityCount = visibleDays.reduce(
     (sum, visibleDay) => sum + visibleDay.activities.filter((activity) => !hasMapPoint(activity)).length,
@@ -3475,7 +4096,7 @@ function MapPanel({
       hasMapPoint(activity) ? [{ activity, index }] : []
     );
     const dayPoints = dayPointItems.map((item) => item.activity);
-    const dayLegs = getAdjacentTransportLegs(visibleDay);
+    const dayLegs = getAdjacentTransportLegs(visibleDay, itinerary);
     const daySegments = routeSegmentsForDay(visibleDay);
     const filteredDayPoints = normalizedMapFilter
       ? dayPointItems.filter(({ activity, index }) => activityMatchesMapFilter(activity, index, visibleDay, normalizedMapFilter))
@@ -3483,7 +4104,7 @@ function MapPanel({
     const filteredDaySegments = normalizedMapFilter
       ? daySegments.filter((segment) => routeSegmentMatchesMapFilter(segment, normalizedMapFilter))
       : daySegments;
-    const expectedLegs = countRoutableAdjacentPairs(visibleDay);
+    const expectedLegs = countRoutableAdjacentPairs(visibleDay, itinerary);
     const dayPendingLegs = Math.max(0, expectedLegs - dayLegs.length);
     const dayMatchesFilter =
       !normalizedMapFilter ||
@@ -3512,21 +4133,17 @@ function MapPanel({
   const tripOverviewDistanceMeters = tripPlannedRouteSegments.reduce((sum, segment) => sum + (segment.leg?.distanceMeters ?? 0), 0);
   const tripOverviewDurationMinutes = tripPlannedRouteSegments.reduce((sum, segment) => sum + (segment.leg?.durationMinutes ?? 0), 0);
   const routeRiskItems = visibleDays.flatMap((visibleDay) =>
-    visibleDay.activities.slice(0, -1).flatMap((fromActivity, index) => {
-      const toActivity = visibleDay.activities[index + 1]!;
-      const leg = (visibleDay.transportLegs ?? []).find(
-        (candidate) => candidate.fromActivityId === fromActivity.id && candidate.toActivityId === toActivity.id
-      );
-      const conflict = leg ? detectTransportTimingConflict(fromActivity, toActivity, leg) : undefined;
-      if (!leg || !conflict) return [];
+    getRoutePairsForDay(itinerary, visibleDay).flatMap((pair) => {
+      const conflict = pair.leg ? detectTransportTimingConflict(pair.fromActivity, pair.toActivity, pair.leg) : undefined;
+      if (!pair.leg || !conflict) return [];
       return [
         {
           day: visibleDay,
-          fromActivity,
-          toActivity,
-          fromIndex: index,
-          toIndex: index + 1,
-          leg,
+          fromActivity: pair.fromActivity,
+          toActivity: pair.toActivity,
+          fromIndex: pair.fromIndex,
+          toIndex: pair.toIndex,
+          leg: pair.leg,
           conflict
         }
       ];
@@ -3641,21 +4258,23 @@ function MapPanel({
   useEffect(() => {
     let cancelled = false;
     async function resolveDestinationCenter() {
-      if (destinationPlaceCoordinates) {
-        setDestinationCenter(destinationPlaceCoordinates);
-        return;
+      try {
+        if (destinationPlaceCoordinates) {
+          setDestinationCenter(destinationPlaceCoordinates);
+          return;
+        }
+        const destination = itinerary.destination.trim();
+        if (!destination) {
+          setDestinationCenter(null);
+          return;
+        }
+        const result = await apiGet<{ items: PlaceSearchItem[] }>(`/maps/poi?keywords=${encodeURIComponent(destination)}&city=${encodeURIComponent(destination)}`);
+        if (cancelled) return;
+        setDestinationCenter(amapPoiItems(result.items)[0]?.location ?? cityFallbackCoordinates(destination));
+      } catch {
+        if (cancelled) return;
+        setDestinationCenter(destinationFallbackCenter);
       }
-      const destination = itinerary.destination.trim();
-      if (!destination) {
-        setDestinationCenter(null);
-        return;
-      }
-      const result = await apiGet<{ items: PlaceSearchItem[] }>(
-        `/maps/poi?keywords=${encodeURIComponent(destination)}&city=${encodeURIComponent(destination)}`,
-        { items: [] }
-      );
-      if (cancelled) return;
-      setDestinationCenter(amapPoiItems(result.items)[0]?.location ?? cityFallbackCoordinates(destination));
     }
     void resolveDestinationCenter();
     return () => {
@@ -3780,14 +4399,17 @@ function MapPanel({
       return;
     }
     setMapSearchStatus("正在搜索高德地点...");
-    const result = await apiGet<{ items: PlaceSearchItem[] }>(
-      `/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent(itinerary.destination)}`,
-      { items: createLocalPoiFallback(query, itinerary.destination) }
-    );
-    const concreteItems = amapPoiItems(result.items);
-    setMapSearchResults(concreteItems);
-    setActiveMapSearchPlaceId(concreteItems.find((place) => place.location)?.id ?? concreteItems[0]?.id ?? null);
-    setMapSearchStatus(concreteItems.length > 0 ? "" : "没有找到可用的高德地点，请换个关键词。");
+    try {
+      const result = await apiGet<{ items: PlaceSearchItem[] }>(`/maps/poi?keywords=${encodeURIComponent(query)}&city=${encodeURIComponent("全国")}`);
+      const concreteItems = amapPoiItems(result.items);
+      setMapSearchResults(concreteItems);
+      setActiveMapSearchPlaceId(concreteItems.find((place) => place.location)?.id ?? concreteItems[0]?.id ?? null);
+      setMapSearchStatus(concreteItems.length > 0 ? "" : "没有找到可用的高德地点，请换个关键词。");
+    } catch (error) {
+      setMapSearchResults([]);
+      setActiveMapSearchPlaceId(null);
+      setMapSearchStatus(readApiRequestErrorMessage(error, "高德地点搜索失败，请稍后重试。"));
+    }
   }
 
   async function addMapPlace(place: PlaceSearchItem) {
@@ -3874,24 +4496,24 @@ function MapPanel({
     <section
       role={mapExpanded ? "region" : undefined}
       aria-label={mapExpanded ? "地图编辑工作区" : undefined}
-      data-testid={mapExpanded ? "map-edit-workspace" : undefined}
+      data-testid={mapExpanded ? "map-edit-workspace" : "map-panel"}
       className={cn(
-        "overflow-hidden rounded-[18px] border border-border bg-white transition-[min-height] md:rounded-[20px]",
+        "overflow-hidden rounded-2xl border border-[#dadad3] bg-white text-[#211922] transition-[min-height]",
         mapExpanded &&
-          "fixed inset-0 z-[1100] flex h-dvh min-h-0 flex-col rounded-none border-0 shadow-2xl md:inset-4 md:h-[calc(100vh-2rem)] md:rounded-[20px] md:border"
+          "fixed inset-0 z-[1100] flex h-dvh min-h-0 flex-col rounded-none border-0 shadow-2xl md:inset-4 md:h-[calc(100vh-2rem)] md:rounded-[32px] md:border md:border-[#dadad3]"
       )}
     >
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-3 py-3 md:gap-4 md:px-4">
-        <div className="min-w-0">
-          <p className="hidden text-sm font-bold md:block">行程地图</p>
-          <h3 className="truncate text-lg font-black md:text-2xl">{itinerary.destination}</h3>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#dadad3] bg-white px-3 py-3 md:gap-4 md:px-4">
+        <div className="min-w-0 self-center">
+          <p className="hidden text-sm font-bold text-[#62625b] md:block">行程地图</p>
+          <h3 className="truncate text-lg font-black text-[#211922] md:text-2xl">出发点：{itinerary.destination}</h3>
           {points.length > 0 && <p className="sr-only">{routeSummary}</p>}
           <div className="mt-1 flex flex-wrap gap-1.5 md:mt-2 md:gap-2" aria-hidden="true">
             {visibleMapSummaryItems.map((item, index) => (
               <span
                 key={item}
                 className={cn(
-                  "rounded-full bg-[#f6f6f3] px-3 py-1 text-xs font-bold text-muted-foreground",
+                  "rounded-full border border-[#e5e5e0] bg-[#f6f6f3] px-3 py-1 text-xs font-bold text-[#62625b]",
                   index === 0 && "hidden sm:inline-flex"
                 )}
               >
@@ -3912,11 +4534,11 @@ function MapPanel({
               {hideEmptyTripDays ? "显示全部日期" : "只看有地点的日期"}
             </Button>
           )}
-          <TabsList className="rounded-full bg-[#f6f6f3] p-1">
+          <TabsList className="h-10 rounded-full bg-[#f6f6f3] p-0">
             <TabsTrigger
               type="button"
               active={mapScope === "day"}
-              className="min-h-8 px-2 text-xs md:min-h-9 md:px-3"
+              className="h-10 min-h-10 px-2 py-0 text-xs data-[active=true]:bg-[#262622] md:px-3"
               onClick={() => setMapScope("day")}
             >
               当前日期
@@ -3924,7 +4546,7 @@ function MapPanel({
             <TabsTrigger
               type="button"
               active={mapScope === "trip"}
-              className="min-h-8 px-2 text-xs md:min-h-9 md:px-3"
+              className="h-10 min-h-10 px-2 py-0 text-xs md:px-3"
               onClick={() => setMapScope("trip")}
             >
               全部行程
@@ -3935,7 +4557,7 @@ function MapPanel({
               type="button"
               variant="secondary"
               size="sm"
-              className="min-h-8 rounded-full px-2.5 text-xs md:min-h-9 md:px-3"
+              className="h-10 min-h-10 rounded-full px-2.5 py-0 text-xs md:px-3"
               onClick={toggleMapExpanded}
             >
               <Search data-icon="inline-start" />
@@ -3943,26 +4565,26 @@ function MapPanel({
             </Button>
           )}
           {mapExpanded && (
-            <Button type="button" variant="outline" size="sm" className="min-h-8 rounded-full px-2.5 text-xs md:min-h-9 md:px-3" onClick={toggleMapExpanded}>
+            <Button type="button" variant="outline" size="sm" className="h-10 min-h-10 rounded-full px-2.5 py-0 text-xs md:px-3" onClick={toggleMapExpanded}>
               收起地图
             </Button>
           )}
         </div>
       </div>
       {mapScope === "trip" && hideEmptyTripDays && hiddenEmptyTripDayCount > 0 && (
-        <div className="border-b border-border bg-white px-4 py-2 text-xs font-semibold text-muted-foreground">
+        <div className="border-b border-[#dadad3] bg-white px-4 py-2 text-xs font-semibold text-muted-foreground">
           已隐藏 {hiddenEmptyTripDayCount} 个空日期
         </div>
       )}
       {lastAddedPlace && (
-        <div className="border-b border-border bg-white px-4 py-2 text-xs font-semibold text-foreground">
+        <div className="border-b border-[#dadad3] bg-white px-4 py-2 text-xs font-semibold text-foreground">
           已加入 {lastAddedPlace.dayTitle}：{lastAddedPlace.placeName}
         </div>
       )}
       {lastRouteFix && (
         <div
           role="status"
-          className="flex flex-wrap items-center justify-between gap-2 border-b border-border bg-emerald-50 px-4 py-2 text-xs font-semibold text-emerald-950"
+          className="flex flex-wrap items-center justify-between gap-2 border-b border-[#dadad3] bg-emerald-50 px-4 py-2 text-xs font-semibold text-emerald-950"
         >
           <span>已将{lastRouteFix.activityTitle}调整到 {lastRouteFix.nextStartTime}</span>
           <Button
@@ -3977,7 +4599,7 @@ function MapPanel({
         </div>
       )}
       {mapExpanded && (
-        <div className="grid gap-2 border-b border-border bg-white px-3 py-3">
+        <div className="grid gap-2 border-b border-[#dadad3] bg-white px-3 py-3">
           <div className="grid grid-cols-[minmax(0,1fr)_96px] gap-2">
             <Input
               className="bg-[#fbfbf9]"
@@ -3993,7 +4615,7 @@ function MapPanel({
                 }
               }}
               aria-label="在地图上搜索地点"
-              placeholder={`搜索${itinerary.destination}景点、餐厅或地点`}
+              placeholder="搜索景点、餐厅、车站或跨城地点"
             />
             <Button type="button" variant="secondary" className="min-w-0 rounded-2xl px-3" onClick={searchMapPlaces} aria-label="搜索地点">
               <Search data-icon="inline-start" />
@@ -4105,7 +4727,7 @@ function MapPanel({
         </div>
       )}
       {showMapEmptyGuidance && (
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-white px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#dadad3] bg-white px-4 py-3">
           <div className="min-w-0">
             <p className="font-black">{mapEmptyTitle}</p>
             <p className="mt-1 text-sm text-muted-foreground">{mapEmptyDescription}</p>
@@ -4391,7 +5013,7 @@ function MapPanel({
                 {filteredDayRouteSummaries.map((summary) => (
                   <article
                     key={summary.day.id}
-                    className="w-full cursor-pointer rounded-2xl bg-white/95 p-3 text-left shadow-sm transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    className="w-full cursor-pointer rounded-2xl border border-[#dadad3] bg-white p-3 text-left transition-colors hover:border-[#c8c8c1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   >
                     <button
                       type="button"
@@ -4563,8 +5185,8 @@ function MapPanel({
                             data-selected={selectedActivityId === activity.id ? "true" : "false"}
                             onClick={() => onSelectActivity(activity.id)}
                             className={cn(
-                              "w-full cursor-pointer rounded-2xl bg-white/95 p-3 text-left shadow-sm transition-colors hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                              selectedActivityId === activity.id && "ring-2 ring-ring"
+                              "w-full cursor-pointer rounded-2xl border border-[#dadad3] bg-white p-3 text-left transition-colors hover:border-[#c8c8c1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              selectedActivityId === activity.id && "border-primary ring-2 ring-primary/15"
                             )}
                           >
                             <span className="text-xs font-black text-primary">{String(index + 1).padStart(2, "0")}</span>
@@ -4596,9 +5218,9 @@ function MapPanel({
                             key={`${segment.fromActivity.id}-${segment.toActivity.id}`}
                             data-selected={segment.leg && selectedTransportLegId === segment.leg.id ? "true" : "false"}
                             className={cn(
-                              "w-full rounded-2xl bg-white/95 p-3 text-left shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                              segment.leg ? "hover:bg-white" : "opacity-70",
-                              segment.leg && selectedTransportLegId === segment.leg.id && "ring-2 ring-ring"
+                              "w-full rounded-2xl border border-[#dadad3] bg-white p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                              segment.leg ? "hover:border-[#c8c8c1]" : "opacity-70",
+                              segment.leg && selectedTransportLegId === segment.leg.id && "border-primary ring-2 ring-primary/15"
                             )}
                           >
                             <button
@@ -4880,7 +5502,58 @@ function numberTextToNonNegativeNumber(value: string): number | undefined {
   return number;
 }
 
-function getAdjacentTransportLegs(day: ItineraryDay): TransportLeg[] {
+function getOvernightStartAnchor(itinerary: TravelItinerary, day: ItineraryDay): OvernightStartAnchor | undefined {
+  const dayIndex = itinerary.days.findIndex((candidate) => candidate.id === day.id);
+  if (dayIndex <= 0) return undefined;
+  const previousDay = itinerary.days[dayIndex - 1];
+  if (!previousDay) return undefined;
+  const index = previousDay.activities.length - 1;
+  const activity = previousDay.activities[index];
+  if (!activity) return undefined;
+  return { day: previousDay, activity, index };
+}
+
+function getRoutePairsForDay(itinerary: TravelItinerary, day: ItineraryDay): DayRoutePair[] {
+  const pairs: DayRoutePair[] = [];
+  const overnightStart = getOvernightStartAnchor(itinerary, day);
+  const firstActivity = day.activities[0];
+  if (overnightStart && firstActivity && canRouteActivityPair(overnightStart.activity, firstActivity)) {
+    pairs.push({
+      day,
+      fromActivity: overnightStart.activity,
+      toActivity: firstActivity,
+      fromIndex: overnightStart.index,
+      toIndex: 0,
+      fromDayId: overnightStart.day.id,
+      toDayId: day.id,
+      leg: findTransportLeg(day, overnightStart.activity.id, firstActivity.id),
+      overnightStart: true
+    });
+  }
+  day.activities.forEach((activity, index) => {
+    const next = day.activities[index + 1];
+    if (!next || !canRouteActivityPair(activity, next)) return;
+    pairs.push({
+      day,
+      fromActivity: activity,
+      toActivity: next,
+      fromIndex: index,
+      toIndex: index + 1,
+      fromDayId: day.id,
+      toDayId: day.id,
+      leg: findTransportLeg(day, activity.id, next.id),
+      overnightStart: false
+    });
+  });
+  return pairs;
+}
+
+function findTransportLeg(day: ItineraryDay, fromActivityId: string, toActivityId: string): TransportLeg | undefined {
+  return (day.transportLegs ?? []).find((leg) => leg.fromActivityId === fromActivityId && leg.toActivityId === toActivityId);
+}
+
+function getAdjacentTransportLegs(day: ItineraryDay, itinerary?: TravelItinerary): TransportLeg[] {
+  if (itinerary) return getRoutePairsForDay(itinerary, day).flatMap((pair) => (pair.leg ? [pair.leg] : []));
   return (day.transportLegs ?? []).filter((leg) =>
     day.activities.some((activity, index) => {
       const next = day.activities[index + 1];
@@ -4889,7 +5562,8 @@ function getAdjacentTransportLegs(day: ItineraryDay): TransportLeg[] {
   );
 }
 
-function countRoutableAdjacentPairs(day: ItineraryDay): number {
+function countRoutableAdjacentPairs(day: ItineraryDay, itinerary?: TravelItinerary): number {
+  if (itinerary) return getRoutePairsForDay(itinerary, day).length;
   return day.activities.reduce((count, activity, index) => {
     const next = day.activities[index + 1];
     return next && canRouteActivityPair(activity, next) ? count + 1 : count;
@@ -4948,61 +5622,20 @@ function loadAmap(key: string, securityJsCode?: string): Promise<any> {
   return amapPromise;
 }
 
-function createFallbackWeather(city: string, date: string): WeatherSummary {
-  return {
-    city,
-    date,
-    weather: "多云，适合户外步行",
-    temperature: "24-30 C",
-    source: "mock"
-  };
-}
-
-function createExternalTextSkillDraft(sourceText: string): TravelSkill {
-  const parsedDraft = parseSkillMarkdown(
-    [
-      "---",
-      "name: extracted-travel-style",
-      "description: 从外部文本提取的旅行风格草稿，需要用户确认后发布。",
-      "---",
-      "",
-      "# 旅行风格草稿",
-      "",
-      "## 风格摘要",
-      sourceText || "等待补充旅行偏好、节奏和禁忌。",
-      "",
-      "## 规划规则",
-      "- 保留文本中反复出现的节奏、地点类型和禁忌。",
-      "- 根据新目的地重新适配，不直接复制全部地点。",
-      "",
-      "## 禁止模式",
-      "- 未经用户确认直接发布"
-    ].join("\n")
-  );
-  const tagTitle = buildExtractedSkillDraftTitle({ tags: parsedDraft.tags });
-  const draftTitle = tagTitle !== "旅行风格草稿" ? tagTitle : deriveDraftSkillTitle(sourceText);
-  return {
-    ...parsedDraft,
-    displayName: draftTitle,
-    status: "draft",
-    source: "extracted"
-  };
-}
-
 function buildItinerarySkillSourceText(itinerary: TravelItinerary): string {
+  const days = itinerary.days ?? [];
   const lines = [
     `当前行程：${itinerary.title}`,
-    `目的地：${itinerary.destination}`,
+    `出发点：${itinerary.destination}`,
     `日期：${itinerary.startDate} 至 ${itinerary.endDate ?? itinerary.startDate}`,
-    itinerary.preferences.length ? `偏好：${itinerary.preferences.join("、")}` : undefined,
     "",
     "每日安排：",
-    ...itinerary.days.flatMap((day) => [
+    ...days.flatMap((day) => [
       `${day.title} ${day.date}`,
-      ...day.activities.map((activity, index) => {
+      ...(day.activities ?? []).map((activity, index) => {
         const time = [activity.startTime, activity.endTime].filter(Boolean).join("-");
         const place = activityPrimaryPlaceName(activity);
-        const tags = activity.tags.length ? `；标签：${activity.tags.join("、")}` : "";
+        const tags = activity.tags?.length ? `；标签：${activity.tags.join("、")}` : "";
         return `${index + 1}. ${activityDisplayName(activity, index)}${place ? `（${place}）` : ""}${time ? `；时间：${time}` : ""}${tags}`;
       })
     ]),
@@ -5043,113 +5676,12 @@ function stripAssistantDiffFromMessage(content: string): string {
     .join(" ");
 }
 
-function completeMissingRoutesLocally(itinerary: TravelItinerary, mode: MapRouteMode): TravelItinerary {
-  let current = itinerary;
+function findActivityInItinerary(itinerary: TravelItinerary, activityId: string): Activity | undefined {
   for (const day of itinerary.days) {
-    for (let index = 0; index < day.activities.length - 1; index += 1) {
-      const fromActivity = day.activities[index];
-      const toActivity = day.activities[index + 1];
-      if (!fromActivity || !toActivity) continue;
-      if (!canRouteActivityPair(fromActivity, toActivity)) continue;
-      const existing = (day.transportLegs ?? []).some(
-        (leg) => leg.fromActivityId === fromActivity.id && leg.toActivityId === toActivity.id
-      );
-      if (existing) continue;
-      const route = createFallbackRoute(fromActivity, toActivity, mode);
-      current = setTransportLeg(current, day.id, {
-        fromActivityId: fromActivity.id,
-        toActivityId: toActivity.id,
-        mode: route.mode,
-        distanceMeters: route.distanceMeters,
-        durationMinutes: route.durationMinutes,
-        provider: route.source,
-        routeStatus: route.status,
-        failureReason: route.fallbackReason,
-        summary: route.summary,
-        polyline: route.polyline ?? [],
-        steps: route.steps ?? []
-      });
-    }
+    const activity = day.activities.find((candidate) => candidate.id === activityId);
+    if (activity) return activity;
   }
-  return current;
-}
-
-function createLocalTransportLegDraft(
-  itinerary: TravelItinerary,
-  dayId: string,
-  fromActivityId: string,
-  toActivityId: string,
-  mode: MapRouteMode,
-  overrides: TransportLegOverride
-): Omit<TransportLeg, "id"> {
-  const day = itinerary.days.find((candidate) => candidate.id === dayId);
-  const fromActivity = day?.activities.find((activity) => activity.id === fromActivityId);
-  const toActivity = day?.activities.find((activity) => activity.id === toActivityId);
-  const route =
-    fromActivity && toActivity && canRouteActivityPair(fromActivity, toActivity)
-      ? createFallbackRoute(fromActivity, toActivity, mode)
-      : {
-        mode,
-        from: fromActivityId,
-        to: toActivityId,
-        distanceMeters: 0,
-        durationMinutes: 0,
-        summary: "路线待确认",
-        source: "mock" as const,
-        polyline: [],
-        steps: [],
-        status: "failed" as const,
-        fallbackReason: "缺少起点或终点，路线待确认"
-      };
-  const manualOverride = Boolean(overrides.manualOverride);
-  return {
-    fromActivityId,
-    toActivityId,
-    mode: route.mode,
-    distanceMeters: overrides.distanceMeters ?? route.distanceMeters,
-    durationMinutes: overrides.durationMinutes ?? route.durationMinutes,
-    costCny: overrides.costCny,
-    provider: manualOverride ? "manual" : route.source,
-    routeStatus: manualOverride ? "manual" : route.status,
-    failureReason: route.fallbackReason,
-    summary: overrides.summary?.trim() || route.summary,
-    note: overrides.note?.trim() || undefined,
-    manualOverride,
-    polyline: route.polyline ?? [],
-    steps: route.steps ?? []
-  };
-}
-
-function createFallbackRoute(from: Activity, to: Activity, mode: MapRouteMode): RouteSummary {
-  const fromPoint = from.place?.coordinates ?? { lng: 120.1551, lat: 30.2741 };
-  const toPoint = to.place?.coordinates ?? { lng: 120.16, lat: 30.27 };
-  const durationByMode: Record<MapRouteMode, number> = {
-    walking: 18,
-    transit: 24,
-    driving: 12,
-    cycling: 10
-  };
-  return {
-    from: routePointForFallback(from),
-    to: routePointForFallback(to),
-    mode,
-    distanceMeters: mode === "walking" ? 1300 : 3600,
-    durationMinutes: durationByMode[mode],
-    summary: mode === "walking" ? "步行路线建议" : "路线建议",
-    polyline: [fromPoint, toPoint],
-    steps: [
-      {
-        instruction: `${routeActionLabel(mode)}前往${activityDisplayName(to)}`,
-        mode,
-        distanceMeters: mode === "walking" ? 1300 : 3600,
-        durationMinutes: durationByMode[mode],
-        polyline: [fromPoint, toPoint]
-      }
-    ],
-    source: "mock",
-    status: "estimated",
-    fallbackReason: "当前为参考估算"
-  };
+  return undefined;
 }
 
 function routeActionLabel(mode: MapRouteMode): string {
@@ -5160,13 +5692,6 @@ function routeActionLabel(mode: MapRouteMode): string {
     cycling: "骑行"
   };
   return labels[mode];
-}
-
-function routePointForFallback(activity: Activity): string {
-  const coordinates = activity.place?.coordinates;
-  if (coordinates) return `${coordinates.lng},${coordinates.lat}`;
-  const fallback = activityPrimaryPlaceName(activity) ?? activity.title.trim();
-  return fallback || "待补地点";
 }
 
 function escapeMapHtml(value: string): string {
@@ -5249,7 +5774,6 @@ function TimePickerField({
 function ActivityDetailsPanel({
   activity,
   index,
-  destination,
   dayOptions,
   currentDayId,
   onChange,
@@ -5258,7 +5782,6 @@ function ActivityDetailsPanel({
 }: {
   activity: Activity;
   index: number;
-  destination: string;
   dayOptions: ItineraryDay[];
   currentDayId: string;
   onChange: (changes: Partial<Activity>) => void;
@@ -5283,7 +5806,7 @@ function ActivityDetailsPanel({
   return (
     <Card className="border-ring/40 bg-white shadow-sm" role="region" aria-label="编辑活动">
       <CardHeader className="gap-3 p-4 md:flex-row md:items-center md:justify-between">
-        <div className="min-w-0">
+        <div className="min-w-0 self-center">
           <CardTitle>编辑活动</CardTitle>
           <CardDescription className="mt-1 truncate">
             第 {index + 1} 站 · {titleText}
@@ -5345,7 +5868,7 @@ function ActivityDetailsPanel({
               <PoiSearchField
                 value={placeQuery}
                 selectedPlace={placeQuery.trim() === (activity.placeName ?? activity.place?.name ?? "") ? activity.place ?? null : null}
-                city={activity.place?.city || destination}
+                city={activity.place?.city || "全国"}
                 ariaLabel={`${titleText} 的地点`}
                 placeholder="搜索地点或景点名称"
                 selectionHint="必须从高德搜索结果中选择地点，选择后会写入坐标并触发路线、天气更新。"
@@ -5425,6 +5948,35 @@ function ActivityDetailsPanel({
   );
 }
 
+function OvernightStartCard({
+  activity,
+  onEdit
+}: {
+  activity: Activity;
+  onEdit: () => void;
+}) {
+  const titleText = activityDisplayName(activity);
+  const placeText = activityPrimaryPlaceName(activity);
+
+  return (
+    <Card className="border-dashed border-[#dadad3] bg-[#fbfbf9]" role="listitem" aria-label={titleText}>
+      <div className="grid gap-3 p-3 md:grid-cols-[44px_minmax(0,1fr)_auto] md:items-center">
+        <span className="flex size-8 items-center justify-center rounded-full bg-white text-xs font-black text-muted-foreground">
+          <Route className="size-4" />
+        </span>
+        <div className="min-w-0">
+          <h4 className="min-w-0 truncate text-base font-black leading-7">{titleText}</h4>
+          {placeText && placeText !== titleText && <p className="truncate text-xs font-semibold text-muted-foreground">{placeText}</p>}
+        </div>
+        <Button type="button" variant="outline" size="sm" className="rounded-full bg-white" onClick={onEdit} aria-label={`编辑${titleText}`}>
+          <Pencil data-icon="inline-start" />
+          编辑
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function ActivityEditor({
   activity,
   index,
@@ -5477,8 +6029,8 @@ function ActivityEditor({
   return (
     <Card
       className={cn(
-        "group cursor-pointer overflow-hidden bg-white transition-[background-color,border-color,box-shadow,opacity,transform] duration-150 hover:border-foreground/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-        selected && "border-ring/70 ring-2 ring-ring/20",
+        "group relative cursor-pointer overflow-hidden border-[#dadad3] bg-white text-[#211922] transition-[background-color,border-color,box-shadow,opacity,transform] duration-150 hover:border-[#c8c8c1] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        selected && "border-primary ring-2 ring-primary/15",
         dragging && "scale-[0.995] border-primary/70 bg-primary/5 opacity-95 shadow-lg ring-2 ring-primary/20",
         dropTarget && "border-primary/70 bg-primary/5 ring-2 ring-primary/15"
       )}
@@ -5508,8 +6060,8 @@ function ActivityEditor({
       )}
       <div
         className={cn(
-          "grid grid-cols-[44px_minmax(0,1fr)] gap-3 p-3 md:grid-cols-[44px_minmax(150px,0.82fr)_minmax(170px,1fr)_minmax(132px,auto)] md:items-center",
-          blankDraft && "grid-cols-[36px_minmax(0,1fr)] gap-2 p-2.5 md:grid-cols-[36px_minmax(150px,0.82fr)_minmax(170px,1fr)_minmax(112px,auto)]"
+          "grid grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-3 p-3",
+          blankDraft && "grid-cols-[32px_minmax(0,1fr)_auto] gap-x-2 gap-y-2 p-2.5"
         )}
       >
         <button
@@ -5521,40 +6073,39 @@ function ActivityEditor({
           aria-label={`拖动${titleText}调整顺序`}
           title="拖动排序"
           className={cn(
-            "flex min-h-11 w-11 cursor-grab items-center justify-center rounded-full border border-border bg-[#f6f6f3] text-muted-foreground transition-all hover:border-foreground/30 hover:bg-secondary active:cursor-grabbing",
-            dragging && "border-primary bg-primary text-primary-foreground shadow-md",
-            blankDraft && "min-h-9 w-9"
+            "flex h-8 min-h-8 w-8 cursor-grab items-center justify-center self-center rounded-full border-0 bg-transparent text-muted-foreground transition-colors hover:text-foreground active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            dragging && "text-primary ring-2 ring-primary/20",
+            blankDraft && "h-8 min-h-8 w-8"
           )}
         >
           <GripVertical className="size-4" />
         </button>
 
-        <div className="min-w-0">
-          <div className="flex min-w-0 items-start gap-2">
-            <span
-              className={cn(
-                "flex size-8 shrink-0 items-center justify-center rounded-full bg-foreground text-xs font-black text-background",
-                blankDraft && "size-7"
-              )}
-            >
-              {index + 1}
-            </span>
-            <div className="min-w-0 flex-1">
-              <h4 className="truncate text-base font-black leading-7">{titleText}</h4>
-              {!blankDraft && (
-                <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                  <Badge className="bg-[#f6f6f3] text-foreground">{typeLabel}</Badge>
-                  {activity.lockedByUser && <Badge>手动锁定</Badge>}
-                  {activity.source === "agent" && <Badge className="bg-accent text-accent-foreground">助手建议</Badge>}
-                </div>
-              )}
-            </div>
+        <div className="min-w-0 self-center">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <h4 className="min-w-0 flex-[1_1_auto] truncate text-base font-black leading-6">{titleText}</h4>
+            {!blankDraft && (
+              <div className="flex shrink-0 flex-wrap items-center gap-1.5">
+                <Badge className="min-h-6 bg-[#f6f6f3] px-2.5 text-[11px] text-[#33332e]">{typeLabel}</Badge>
+                {activity.lockedByUser && <Badge className="min-h-6 px-2.5 text-[11px]">手动锁定</Badge>}
+                {activity.source === "agent" && <Badge className="min-h-6 bg-accent px-2.5 text-[11px] text-accent-foreground">助手建议</Badge>}
+              </div>
+            )}
           </div>
         </div>
+        <span
+          className={cn(
+            "flex size-8 shrink-0 items-center justify-center self-center rounded-full bg-[#262622] text-xs font-black text-white",
+            selected && "bg-primary text-primary-foreground",
+            blankDraft && "size-7"
+          )}
+        >
+          {index + 1}
+        </span>
 
         <div
           className={cn(
-            "col-span-2 grid min-h-14 gap-1 rounded-xl bg-[#fbfbf9] px-3 py-2 text-xs font-semibold text-muted-foreground md:col-span-1",
+            "col-span-3 grid min-h-14 gap-1 rounded-2xl border border-[#e5e5e0] bg-[#f6f6f3] px-3 py-2 text-xs font-semibold text-[#62625b]",
             blankDraft && "min-h-11"
           )}
         >
@@ -5590,12 +6141,12 @@ function ActivityEditor({
           )}
         </div>
 
-        <div className="col-span-2 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2 md:col-span-1 md:flex-col md:items-end md:justify-center md:border-t-0 md:pt-0">
+        <div className="col-span-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/70 pt-2">
           {statusSummary && (
             <span
               className={cn(
                 "inline-flex min-h-8 max-w-full items-center gap-1.5 rounded-full px-3 text-xs font-black",
-                timeSummary ? "bg-[#f6f6f3] text-foreground" : "bg-secondary text-muted-foreground"
+                timeSummary ? "bg-[#f6f6f3] text-[#211922]" : "bg-secondary text-muted-foreground"
               )}
             >
               <Clock3 className="size-3.5 shrink-0" />
@@ -5605,7 +6156,7 @@ function ActivityEditor({
           <Button
             variant="ghost"
             size="sm"
-            className="min-h-9 rounded-full bg-[#f6f6f3] px-3 text-xs"
+            className="min-h-9 rounded-full bg-[#f6f6f3] px-3 text-xs text-[#211922] hover:bg-[#e5e5e0]"
             onClick={(event) => {
               event.stopPropagation();
               onSelect();
@@ -5616,7 +6167,7 @@ function ActivityEditor({
             编辑
           </Button>
           {selected && (
-            <div className="flex flex-wrap items-center gap-1 rounded-full bg-[#f6f6f3] p-1" aria-label={`${titleText} 的次要操作`}>
+            <div className="flex flex-wrap items-center gap-1 rounded-full border border-[#e5e5e0] bg-[#f6f6f3] p-1" aria-label={`${titleText} 的次要操作`}>
               <Button
                 variant="ghost"
                 size="icon"
@@ -5740,81 +6291,86 @@ function TransportLegEditor({
   }
 
   return (
-    <div className="ml-7 border-l border-dashed border-border pl-6">
+    <div className="ml-6 border-l border-dashed border-[#dadad3] pl-4 sm:pl-5">
       <div
         role="group"
         aria-label={`路线：${routeTitle}`}
         data-selected={selected ? "true" : "false"}
         className={cn(
-          "rounded-xl bg-[#fbfbf9] px-4 py-3 text-sm transition-colors",
-          selected && "ring-2 ring-ring"
+          "relative rounded-[18px] border border-[#e5e5e0] bg-[#f6f6f3] px-3 py-3 text-sm text-[#211922] transition-colors",
+          selected && "border-primary ring-2 ring-primary/15"
         )}
       >
-        <div className="grid gap-3 md:grid-cols-[40px_minmax(170px,0.95fr)_minmax(190px,1fr)] xl:grid-cols-[40px_minmax(170px,0.95fr)_minmax(190px,1fr)_auto] xl:items-center">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-full bg-white text-muted-foreground">
-            <Route className="size-4" />
-          </span>
-          <div className="min-w-0">
-            <p className="text-xs font-bold text-muted-foreground">路线</p>
-            <p className="truncate font-black">{routeTitle}</p>
-          </div>
-          <div className="grid min-h-14 min-w-0 gap-1 rounded-xl bg-white px-3 py-2 text-xs font-semibold text-muted-foreground">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {provider && <Badge className={cn("min-h-6 px-2.5", provider.className)}>{provider.label}</Badge>}
-              <span className="rounded-full bg-[#f6f6f3] px-3 py-1 font-bold text-foreground">{metricText}</span>
-              {leg?.summary && <span className="min-w-0 flex-1 truncate">{leg.summary}</span>}
+        <div className="grid gap-2">
+          <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-[#62625b]">路线</p>
+              <p className="mt-0.5 truncate font-black text-[#211922]">{routeTitle}</p>
             </div>
-            {leg?.manualOverride && leg.note && (
-              <span className="truncate font-semibold text-primary">手动调整：{leg.note}</span>
-            )}
-            {routeFailed && (
-              <span className="rounded-xl bg-red-50 px-3 py-2 font-semibold text-red-950">
-                {leg?.failureReason ?? "路线计算失败，请补全地点或手动填写交通。"}
+            <div className="flex items-center gap-1.5">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-[#dadad3] bg-white text-[#62625b]">
+                <Route className="size-3.5" />
               </span>
-            )}
-            {timingConflict && (
-              <span className="rounded-xl bg-amber-50 px-3 py-2 font-semibold text-amber-950">
-                {timingConflict.message}
-              </span>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2 md:col-span-3 xl:col-span-1 xl:justify-end">
-            {leg && (
+              {leg && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  className="size-8 min-h-8 rounded-full bg-white p-0"
+                  onClick={() => {
+                    onFocus();
+                    onSelect(leg.id);
+                    onShowInMap(leg.id);
+                  }}
+                  aria-label={`在地图中查看路线：${routeTitle}`}
+                  title="地图"
+                >
+                  <MapPinned className="size-4" data-icon="inline-start" />
+                  <span className="sr-only">地图</span>
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
-                size="sm"
+                size="icon"
                 onClick={() => {
                   onFocus();
-                  onSelect(leg.id);
-                  onShowInMap(leg.id);
+                  if (leg) onSelect(leg.id);
+                  setDetailsOpen((open) => !open);
                 }}
-                aria-label={`在地图中查看路线：${routeTitle}`}
+                aria-expanded={detailsOpen}
+                aria-label={`编辑路线细节：${routeTitle}`}
+                className="size-8 min-h-8 rounded-full bg-white p-0"
+                title={detailsOpen ? "收起细节" : routeFailed ? "修正路线" : "路线细节"}
               >
-                <MapPinned data-icon="inline-start" />
-                地图
+                {detailsOpen ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
+                <span className="sr-only">{detailsOpen ? "收起细节" : routeFailed ? "修正路线" : "路线细节"}</span>
               </Button>
-            )}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                onFocus();
-                if (leg) onSelect(leg.id);
-                setDetailsOpen((open) => !open);
-              }}
-              aria-expanded={detailsOpen}
-              aria-label={`编辑路线细节：${routeTitle}`}
-            >
-              {detailsOpen ? "收起细节" : routeFailed ? "修正路线" : "路线细节"}
-            </Button>
-            {showQuickPlanAction && (
-              <Button type="button" variant="secondary" size="sm" onClick={() => onSave(mode)}>
-                {leg ? "重新规划路线" : "规划路线"}
-              </Button>
-            )}
+            </div>
           </div>
+          <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs font-semibold text-[#62625b]">
+            {provider && <Badge className={cn("min-h-6 px-2.5", provider.className)}>{provider.label}</Badge>}
+            <span className="rounded-full bg-white px-3 py-1 font-bold text-[#211922]">{metricText}</span>
+            {leg?.summary && <span className="min-w-0 flex-1 basis-48 truncate">{leg.summary}</span>}
+          </div>
+          {leg?.manualOverride && leg.note && (
+            <p className="truncate text-xs font-semibold text-primary">手动调整：{leg.note}</p>
+          )}
+          {routeFailed && (
+            <p className="rounded-xl bg-red-50 px-3 py-2 text-xs font-semibold text-red-950">
+              {leg?.failureReason ?? "路线计算失败，请补全地点或手动填写交通。"}
+            </p>
+          )}
+          {timingConflict && (
+            <p className="rounded-xl bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950">
+              {timingConflict.message}
+            </p>
+          )}
+          {showQuickPlanAction && (
+            <Button type="button" variant="secondary" size="sm" className="h-9 min-h-9 w-fit rounded-full px-3 py-0 text-xs" onClick={() => onSave(mode)}>
+              {leg ? "重新规划路线" : "规划路线"}
+            </Button>
+          )}
         </div>
         {detailsOpen && (
           <div className="mt-3 grid gap-3 rounded-xl bg-white p-3">
@@ -6113,14 +6669,18 @@ function AgentPanel({
   agentInput,
   agentRunning,
   agentProgress,
+  agentRunLog,
   onImportSkill,
   onRemoveSkill,
   onAgentInputChange,
   onRunAgent,
   onStopAgent,
+  onToggleAgentRunLog,
+  onToggleActiveAgentRunLog,
   onCreateSkillFromConversation,
   onUndoAgentChange,
   onLocateAgentChange,
+  savedMemoryKeywords,
   onClose
 }: {
   skills: TravelSkill[];
@@ -6130,14 +6690,18 @@ function AgentPanel({
   agentInput: string;
   agentRunning: boolean;
   agentProgress: string[];
+  agentRunLog: AgentRunLog | null;
   onImportSkill: (skillId: string) => void;
   onRemoveSkill: (skillId: string) => void;
   onAgentInputChange: (value: string) => void;
   onRunAgent: (requestText?: string) => void;
   onStopAgent: () => void;
+  onToggleAgentRunLog: (messageIndex: number) => void;
+  onToggleActiveAgentRunLog: () => void;
   onCreateSkillFromConversation: () => void;
   onUndoAgentChange: (messageIndex: number) => void;
   onLocateAgentChange: (target: AgentChangeTarget) => void;
+  savedMemoryKeywords: string[];
   onClose?: () => void;
 }) {
   const displaySkills = useMemo(() => dedupeSkillsForDisplay(skills, importedSkillIds), [importedSkillIds, skills]);
@@ -6147,21 +6711,44 @@ function AgentPanel({
       new Map(
         recommendSkills(displaySkills, {
           destination: itinerary.destination,
-          companions: itinerary.companions,
-          preferences: itinerary.preferences,
+          companions: [],
+          preferences: savedMemoryKeywords,
           currentText: `${itinerary.title} ${itinerary.days.flatMap((day) => day.activities.map((activity) => activity.title)).join(" ")}`,
           importedSkillIds
         }).map((recommendation) => [recommendation.skill.id, recommendation])
       ),
-    [displaySkills, importedSkillIds, itinerary]
+    [displaySkills, importedSkillIds, itinerary, savedMemoryKeywords]
   );
   const [skillBrowserOpen, setSkillBrowserOpen] = useState(false);
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  const runLogAnchorRef = useRef<{ element: HTMLElement; top: number } | null>(null);
+  const skipNextAutoScrollRef = useRef(false);
+  function preserveRunLogAnchor(anchorElement?: HTMLElement | null) {
+    const container = conversationScrollRef.current;
+    if (!container || !anchorElement) return;
+    runLogAnchorRef.current = {
+      element: anchorElement,
+      top: anchorElement.getBoundingClientRect().top
+    };
+    skipNextAutoScrollRef.current = true;
+  }
+  useLayoutEffect(() => {
+    const container = conversationScrollRef.current;
+    const anchor = runLogAnchorRef.current;
+    if (!container || !anchor) return;
+    runLogAnchorRef.current = null;
+    const nextTop = anchor.element.getBoundingClientRect().top;
+    container.scrollTop += nextTop - anchor.top;
+  });
   useEffect(() => {
     const container = conversationScrollRef.current;
     if (!container) return;
+    if (skipNextAutoScrollRef.current) {
+      skipNextAutoScrollRef.current = false;
+      return;
+    }
     container.scrollTop = container.scrollHeight;
-  }, [agentProgress.length, agentRunning, messages]);
+  }, [agentProgress.length, agentRunLog?.items.length, agentRunLog?.expanded, agentRunning, messages]);
   return (
     <>
     <aside className="relative flex h-full min-h-0 flex-col bg-[#fbfbf9]">
@@ -6170,50 +6757,26 @@ function AgentPanel({
         <div className="min-w-0 flex-1">
           <h2 className="font-black">旅行助手</h2>
           <p className="truncate text-xs text-muted-foreground">
-            {itinerary.title} · {itinerary.destination} · {itinerary.days.length} 天
+            {itinerary.title} · 出发点 {itinerary.destination} · {itinerary.days.length} 天
           </p>
         </div>
         {onClose && (
-          <Button type="button" variant="ghost" size="icon" className="2xl:hidden" onClick={onClose} aria-label="关闭旅行助手">
+          <Button type="button" variant="ghost" size="icon" className="min-[769px]:hidden" onClick={onClose} aria-label="关闭旅行助手">
             <X />
           </Button>
         )}
       </header>
-      <div className="border-b border-border bg-white px-4 py-2.5">
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs font-black text-muted-foreground">当前风格</p>
-          <div className="flex shrink-0 items-center gap-1">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-8 rounded-full"
-              disabled={messages.length === 0 || agentRunning}
-              onClick={onCreateSkillFromConversation}
-              aria-label="沉淀风格"
-              title="沉淀风格"
-            >
-              <WandSparkles className="size-4" />
-            </Button>
-            <Button
-              type="button"
-              variant={skillBrowserOpen ? "secondary" : "ghost"}
-              size="icon"
-              className="size-8 rounded-full"
-              onClick={() => setSkillBrowserOpen((open) => !open)}
-              aria-label="浏览风格"
-              title="浏览风格"
-            >
-              <Store className="size-4" />
-            </Button>
-          </div>
-        </div>
-        <div className="mt-1.5 flex min-h-8 min-w-0 flex-wrap items-center gap-1.5">
+      <div data-testid="agent-style-strip" className="flex min-h-14 items-center gap-2 border-b border-border bg-white px-4 py-2">
+        <p className="shrink-0 text-xs font-black text-muted-foreground">当前风格</p>
+        <div
+          data-testid="agent-style-list"
+          className="flex min-h-8 min-w-0 flex-1 items-center gap-1.5 overflow-x-auto whitespace-nowrap"
+        >
           {appliedSkills.length > 0 ? (
             appliedSkills.map((skill) => (
               <span
                 key={skill.id}
-                className="inline-flex min-h-8 min-w-0 max-w-full items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
+                className="inline-flex min-h-8 min-w-0 max-w-[180px] shrink-0 items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-0.5 text-xs font-bold text-foreground"
               >
                 <span className="min-w-0 flex-1 truncate">{skillDisplayTitle(skill)}</span>
                 <button
@@ -6227,14 +6790,39 @@ function AgentPanel({
               </span>
             ))
           ) : (
-            <span className="min-w-0 truncate rounded-full bg-[#f6f6f3] px-2.5 py-1 text-xs font-semibold text-muted-foreground">
+            <span className="shrink-0 rounded-full bg-[#f6f6f3] px-2.5 py-1 text-xs font-semibold text-muted-foreground">
               未选择风格
             </span>
           )}
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className="size-8 rounded-full"
+            disabled={messages.length === 0 || agentRunning}
+            onClick={onCreateSkillFromConversation}
+            aria-label="沉淀风格"
+            title="沉淀风格"
+          >
+            <WandSparkles className="size-4" />
+          </Button>
+          <Button
+            type="button"
+            variant={skillBrowserOpen ? "secondary" : "ghost"}
+            size="icon"
+            className="size-8 rounded-full"
+            onClick={() => setSkillBrowserOpen((open) => !open)}
+            aria-label="浏览风格"
+            title="浏览风格"
+          >
+            <Store className="size-4" />
+          </Button>
+        </div>
       </div>
-      <div ref={conversationScrollRef} className="flex min-h-0 flex-1 flex-col overflow-auto p-4" data-testid="agent-message-scroll">
-        <div className="flex min-h-full flex-col justify-end gap-3">
+      <div ref={conversationScrollRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4" data-testid="agent-message-scroll">
+        <div className="flex min-h-max flex-col gap-3" data-testid="agent-message-stack">
           {messages.length === 0 && !agentRunning && (
             <section className="rounded-2xl border border-border bg-white p-3" aria-label="旅行助手建议">
               <p className="text-sm font-black">试试这些需求</p>
@@ -6263,26 +6851,28 @@ function AgentPanel({
               <MessageContent
                 content={message.content}
                 changeSet={message.changeSet}
+                runLog={message.runLog}
                 onUndo={() => onUndoAgentChange(index)}
                 onLocate={onLocateAgentChange}
+                onToggleRunLog={(anchorElement) => {
+                  preserveRunLogAnchor(anchorElement);
+                  onToggleAgentRunLog(index);
+                }}
                 onRunSuggestion={message.role === "assistant" ? onRunAgent : undefined}
                 actionsDisabled={agentRunning}
               />
             </div>
           ))}
-          {agentRunning && agentProgress.length > 0 && (
-            <Card className="max-w-[92%] self-start border-primary/20 bg-white">
-              <CardHeader className="pb-3">
-                <CardTitle>正在处理行程</CardTitle>
-              </CardHeader>
-              <CardContent className="flex flex-col gap-2">
-                {agentProgress.map((item) => (
-                  <div key={item} className="rounded-2xl bg-secondary px-3 py-2 text-xs">
-                    {item}
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
+          {agentRunning && agentRunLog && (
+            <div className="max-w-[92%] self-start" aria-live="polite">
+              <AgentRunLogPanel
+                runLog={agentRunLog}
+                onToggle={(anchorElement) => {
+                  preserveRunLogAnchor(anchorElement);
+                  onToggleActiveAgentRunLog();
+                }}
+              />
+            </div>
           )}
         </div>
       </div>
@@ -6338,7 +6928,7 @@ function AgentPanel({
             <div className="grid gap-2">
               {displaySkills.map((skill) => {
                 const imported = importedSkillIds.includes(skill.id);
-                const fitReasons = buildSkillFitReasons(skill, skillRecommendationById.get(skill.id), itinerary);
+                const fitReasons = buildSkillFitReasons(skill, skillRecommendationById.get(skill.id), itinerary, savedMemoryKeywords);
                 return (
                   <div
                     key={skill.id}
@@ -6496,6 +7086,51 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
       continue;
     }
 
+    if (isMarkdownTableStart(lines, index)) {
+      const headerCells = parseMarkdownTableCells(lines[index] ?? "");
+      const alignments = parseMarkdownTableAlignments(lines[index + 1] ?? "", headerCells.length);
+      const rows: string[][] = [];
+      index += 2;
+      while (index < lines.length && isMarkdownTableRow(lines[index] ?? "")) {
+        rows.push(normalizeMarkdownTableCells(parseMarkdownTableCells(lines[index] ?? ""), headerCells.length));
+        index += 1;
+      }
+      blocks.push(
+        <div key={`table-${index}`} className="overflow-x-auto rounded-xl border border-border bg-white">
+          <table data-testid="markdown-table" className="min-w-full border-collapse text-left text-xs">
+            <thead className="bg-[#f6f6f3]">
+              <tr>
+                {headerCells.map((cell, cellIndex) => (
+                  <th
+                    key={`table-head-${index}-${cellIndex}`}
+                    scope="col"
+                    className={cn("border-b border-border px-2 py-2 font-black text-foreground", alignments[cellIndex])}
+                  >
+                    {renderInlineMarkdown(cell, `table-head-${index}-${cellIndex}`)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`table-row-${index}-${rowIndex}`} className="border-t border-border/70">
+                  {row.map((cell, cellIndex) => (
+                    <td
+                      key={`table-cell-${index}-${rowIndex}-${cellIndex}`}
+                      className={cn("px-2 py-2 align-top leading-5 text-muted-foreground", alignments[cellIndex])}
+                    >
+                      {renderInlineMarkdown(cell, `table-cell-${index}-${rowIndex}-${cellIndex}`)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = [];
       while (index < lines.length && /^\s*[-*]\s+/.test(lines[index] ?? "")) {
@@ -6542,7 +7177,8 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
       !/^(#{1,3})\s+/.test(lines[index] ?? "") &&
       !/^\s*[-*]\s+/.test(lines[index] ?? "") &&
       !/^\s*\d+\.\s+/.test(lines[index] ?? "") &&
-      !/^```/.test(lines[index] ?? "")
+      !/^```/.test(lines[index] ?? "") &&
+      !isMarkdownTableStart(lines, index)
     ) {
       paragraphLines.push((lines[index] ?? "").trim());
       index += 1;
@@ -6556,21 +7192,191 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
   return blocks;
 }
 
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  const headerCells = parseMarkdownTableCells(lines[index] ?? "");
+  if (headerCells.length < 2) return false;
+  return isMarkdownTableDivider(lines[index + 1] ?? "", headerCells.length);
+}
+
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.includes("|")) return false;
+  return parseMarkdownTableCells(trimmed).length >= 2;
+}
+
+function isMarkdownTableDivider(line: string, expectedColumns: number): boolean {
+  const cells = parseMarkdownTableCells(line);
+  if (cells.length !== expectedColumns) return false;
+  return cells.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s+/g, "")));
+}
+
+function parseMarkdownTableCells(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.includes("|")) return [];
+  const withoutLeading = trimmed.startsWith("|") ? trimmed.slice(1) : trimmed;
+  const withoutOuterPipes = withoutLeading.endsWith("|") ? withoutLeading.slice(0, -1) : withoutLeading;
+  return withoutOuterPipes.split("|").map((cell) => cell.trim());
+}
+
+function parseMarkdownTableAlignments(dividerLine: string, expectedColumns: number): string[] {
+  return normalizeMarkdownTableCells(parseMarkdownTableCells(dividerLine), expectedColumns).map((cell) => {
+    const compact = cell.replace(/\s+/g, "");
+    if (compact.startsWith(":") && compact.endsWith(":")) return "text-center";
+    if (compact.endsWith(":")) return "text-right";
+    return "text-left";
+  });
+}
+
+function normalizeMarkdownTableCells(cells: string[], expectedColumns: number): string[] {
+  return Array.from({ length: expectedColumns }, (_, index) => cells[index] ?? "");
+}
+
+function AgentRunLogPanel({ runLog, onToggle }: { runLog: AgentRunLog; onToggle?: (anchorElement?: HTMLElement | null) => void }) {
+  const panelRef = useRef<HTMLElement | null>(null);
+  const primaryItems = primaryAgentActivityItems(runLog.items);
+  const reasoningItems = reasoningAgentActivityItems(runLog.items);
+  const statusLabel: Record<AgentRunLog["status"], string> = {
+    running: "执行中",
+    completed: "任务已完成",
+    failed: "未完成",
+    stopped: "已停止"
+  };
+  const statusClassName =
+    runLog.status === "completed"
+      ? "bg-emerald-100 text-emerald-950"
+      : runLog.status === "failed"
+        ? "bg-destructive text-destructive-foreground"
+        : runLog.status === "stopped"
+          ? "bg-[#f6f6f3] text-muted-foreground"
+          : "bg-primary text-primary-foreground";
+  return (
+    <section
+      ref={panelRef}
+      role="group"
+      aria-label="Agent 执行记录"
+      className="grid gap-2 rounded-2xl border border-border bg-[#fbfbf9] p-2.5 text-xs"
+    >
+      <button
+        type="button"
+        className="flex w-full items-center gap-2 rounded-xl text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        aria-expanded={runLog.expanded}
+        aria-label={`Agent 执行记录：${runLog.summary}`}
+        onClick={() => onToggle?.(panelRef.current)}
+      >
+        <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-[10px] font-black", statusClassName)}>
+          {statusLabel[runLog.status]}
+        </span>
+        <span className="min-w-0 flex-1 font-black text-foreground">{runLog.summary}</span>
+        {runLog.expanded ? <ChevronUp className="size-4 shrink-0" /> : <ChevronDown className="size-4 shrink-0" />}
+      </button>
+      {runLog.expanded && (
+        <div className="grid gap-2">
+          {reasoningItems.length > 0 && (
+            <div className="grid gap-2">
+              {reasoningItems.map((item) => (
+                <section key={item.id} data-testid="agent-reasoning-block" className="rounded-xl bg-white p-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="font-black text-foreground">{item.title}</p>
+                    {item.agent && (
+                      <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-black text-foreground">
+                        {agentLabel(item.agent)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-1 max-h-32 overflow-y-auto rounded-lg bg-[#fbfbf9] p-2 leading-5 text-muted-foreground">
+                    {item.detail}
+                  </p>
+                </section>
+              ))}
+            </div>
+          )}
+          {primaryItems.length === 0 && reasoningItems.length === 0 && runLog.status === "running" && (
+            <div
+              data-testid="agent-thinking-placeholder"
+              className="flex items-center gap-2 rounded-xl bg-white p-2 text-xs font-semibold text-muted-foreground"
+            >
+              <span
+                data-testid="agent-thinking-spinner"
+                className="size-3 shrink-0 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"
+                aria-hidden="true"
+              />
+              <span>思考中</span>
+            </div>
+          )}
+          {primaryItems.length === 0 && reasoningItems.length === 0 && runLog.status !== "running" && (
+            <p className="rounded-xl bg-white p-2 text-xs font-semibold text-muted-foreground">暂无模型输出或工具调用。</p>
+          )}
+          {primaryItems.length > 0 && (
+        <ol data-testid="agent-primary-step-list" className="grid gap-2">
+          {primaryItems.map((item, index) => (
+            <li key={item.id} className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 rounded-xl bg-white p-2">
+              <span className="flex size-5 shrink-0 items-center justify-center rounded-full bg-[#f6f6f3] text-[10px] font-black text-muted-foreground">
+                {index + 1}
+              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <p className="font-black text-foreground">{item.title}</p>
+                  {shouldShowAgentActivityLabel(item) && (
+                    <span className="rounded-full bg-[#f6f6f3] px-2 py-0.5 text-[10px] font-black text-muted-foreground">
+                      {agentActivityLabel(item)}
+                    </span>
+                  )}
+                  {shouldShowAgentBadge(item) && item.agent && (
+                    <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-black text-foreground">
+                      {agentLabel(item.agent)}
+                    </span>
+                  )}
+                </div>
+                {item.detail && (
+                  <p
+                    className={cn(
+                      "mt-1 leading-5 text-muted-foreground",
+                      "max-h-40 overflow-y-auto rounded-lg bg-[#fbfbf9] p-2",
+                      item.kind === "thought" && item.status === "running" && "italic"
+                    )}
+                  >
+                    {item.detail}
+                  </p>
+                )}
+                {hasTechnicalPayload(item.technical) && (
+                  <details className="mt-2 rounded-lg border border-border bg-[#fbfbf9] px-2 py-1">
+                    <summary className="cursor-pointer text-[10px] font-black text-muted-foreground">技术详情</summary>
+                    <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-4 text-muted-foreground">
+                      {formatTechnicalPayload(item.technical)}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            </li>
+          ))}
+        </ol>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function MessageContent({
   content,
   changeSet,
+  runLog,
   onUndo,
   onLocate,
+  onToggleRunLog,
   onRunSuggestion,
   actionsDisabled
 }: {
   content: string;
   changeSet?: AgentChangeSet;
+  runLog?: AgentRunLog;
   onUndo?: () => void;
   onLocate?: (target: AgentChangeTarget) => void;
+  onToggleRunLog?: (anchorElement?: HTMLElement | null) => void;
   onRunSuggestion?: (requestText: string) => void;
   actionsDisabled?: boolean;
 }) {
+  const runLogNode = runLog ? <AgentRunLogPanel runLog={runLog} onToggle={onToggleRunLog} /> : null;
   const lines = content.split("\n");
   const diffStartIndex = lines.findIndex((line) => line === "本轮改动");
   if (diffStartIndex >= 0) {
@@ -6584,6 +7390,7 @@ function MessageContent({
     const styleInfluences = changeSet?.styleInfluences ?? [];
     return (
       <div className="grid gap-3">
+        {runLogNode}
         {renderMarkdownBlocks(bodyLines.join("\n"))}
         {diffItems.length > 0 && (
           <section
@@ -6670,6 +7477,7 @@ function MessageContent({
   const optionActions = buildRouteConflictOptionActions(content);
   return (
     <div className="grid gap-2">
+      {runLogNode}
       {renderMarkdownBlocks(content)}
       {optionActions.length > 0 && onRunSuggestion && (
         <section
@@ -6731,6 +7539,7 @@ function SkillPlaza({
   recommendations,
   itinerary,
   importedSkillIds,
+  savedMemoryKeywords,
   filter,
   onImport,
   onRemoveImport,
@@ -6743,6 +7552,7 @@ function SkillPlaza({
   recommendations: ReturnType<typeof recommendSkills>;
   itinerary: TravelItinerary;
   importedSkillIds: string[];
+  savedMemoryKeywords: string[];
   filter: SkillFilter;
   onImport: (skillId: string) => void;
   onRemoveImport: (skillId: string) => void;
@@ -6903,6 +7713,7 @@ function SkillPlaza({
               skill={skill}
               recommendation={recommendationBySkillId.get(skill.id)}
               itinerary={itinerary}
+              savedMemoryKeywords={savedMemoryKeywords}
               imported={importedSkillIds.includes(skill.id)}
               onImport={() => onImport(skill.id)}
               onRemoveImport={() => onRemoveImport(skill.id)}
@@ -6921,6 +7732,7 @@ function SkillCard({
   skill,
   recommendation,
   itinerary,
+  savedMemoryKeywords,
   imported,
   onImport,
   onRemoveImport,
@@ -6931,6 +7743,7 @@ function SkillCard({
   skill: TravelSkill;
   recommendation?: SkillRecommendation;
   itinerary: TravelItinerary;
+  savedMemoryKeywords: string[];
   imported: boolean;
   onImport: () => void;
   onRemoveImport: () => void;
@@ -6941,7 +7754,7 @@ function SkillCard({
   const [tagText, setTagText] = useState(skill.tags.join(","));
   const [tagEditorOpen, setTagEditorOpen] = useState(false);
   const displayTitle = skillDisplayTitle(skill);
-  const fitReasons = buildSkillFitReasons(skill, recommendation, itinerary);
+  const fitReasons = buildSkillFitReasons(skill, recommendation, itinerary, savedMemoryKeywords);
 
   useEffect(() => {
     setTagText(skill.tags.join(","));
@@ -7090,26 +7903,30 @@ function SkillCardVisual({ skill }: { skill: TravelSkill }) {
 }
 
 function skillVisualProfile(skill: TravelSkill): { tone: string; label: string; subject: string } {
-  const text = [skill.displayName, skill.description, skill.body, ...skill.tags].join(" ");
+  const tags = skill.tags ?? [];
+  const text = [skill.displayName, skill.description, skill.body, ...tags].join(" ");
   if (/海边|日落|松弛|小店/.test(text)) return { tone: "seaside", label: "海边松弛", subject: "日落与街区小店" };
   if (/亲子|博物馆|展馆/.test(text)) return { tone: "museum", label: "亲子博物馆", subject: "展馆与休息节奏" };
   if (/咖啡|citywalk|街区|慢节奏/.test(text)) return { tone: "citywalk", label: "街区漫步", subject: "咖啡与轻量步行" };
   if (/雨天|室内/.test(text)) return { tone: "rainy", label: "雨天室内", subject: "室内备选与休息" };
-  return { tone: "default", label: "旅行风格", subject: skill.tags.slice(0, 2).join("与") || "自定义规则" };
+  return { tone: "default", label: "旅行风格", subject: tags.slice(0, 2).join("与") || "自定义规则" };
 }
 
 function buildSkillFitReasons(
   skill: TravelSkill,
   recommendation: SkillRecommendation | undefined,
-  itinerary: TravelItinerary
+  itinerary: TravelItinerary,
+  memoryKeywords: string[]
 ): string[] {
   const reasons = new Set<string>();
-  const matchedPreferences = itinerary.preferences.filter((preference) => skill.tags.includes(preference));
-  if (matchedPreferences.length) {
-    reasons.add(`匹配当前偏好：${matchedPreferences.slice(0, 3).join("、")}`);
+  const skillTags = skill.tags ?? [];
+  const itineraryDays = itinerary.days ?? [];
+  const matchedMemoryKeywords = memoryKeywords.filter((keyword) => skillTags.includes(keyword));
+  if (matchedMemoryKeywords.length) {
+    reasons.add(`匹配已保存记忆：${matchedMemoryKeywords.slice(0, 3).join("、")}`);
   }
-  const activityTags = new Set(itinerary.days.flatMap((day) => day.activities.flatMap((activity) => activity.tags)));
-  const matchedActivityTags = skill.tags.filter((tag) => activityTags.has(tag));
+  const activityTags = new Set(itineraryDays.flatMap((day) => (day.activities ?? []).flatMap((activity) => activity.tags ?? [])));
+  const matchedActivityTags = skillTags.filter((tag) => activityTags.has(tag));
   if (matchedActivityTags.length) {
     reasons.add(`与已安排内容相符：${matchedActivityTags.slice(0, 3).join("、")}`);
   }
@@ -7123,219 +7940,431 @@ function buildSkillFitReasons(
     reasons.add(`使用后会优先遵循：${skill.rules[0]}`);
   }
   if (reasons.size === 0) {
-    reasons.add(`可作为「${itinerary.destination}」行程的风格参考`);
+    reasons.add(`可作为从「${itinerary.destination}」出发的行程风格参考`);
   }
   return [...reasons].slice(0, 3);
 }
 
 function SkillCreator({
   sourceText,
-  draft,
   onSourceTextChange,
   onUseCurrentItinerary,
-  onExtract,
+  onStart,
+  onCreatorReply,
   onPublish
 }: {
   sourceText: string;
-  draft: TravelSkill | null;
   onSourceTextChange: (value: string) => void;
   onUseCurrentItinerary: () => void;
-  onExtract: () => void;
+  onStart: () => Promise<SkillCreatorStartResponse>;
+  onCreatorReply: (sessionId: string, answer: { selectedOptionIds: string[]; customAnswer: string }) => Promise<SkillCreatorReplyResponse>;
   onPublish: (changes: Partial<TravelSkill>) => void;
 }) {
-  return (
-    <div className="mx-auto flex min-h-screen max-w-4xl flex-col gap-5 p-6">
-      <div>
-        <h2 className="text-3xl font-black">创作 Skill</h2>
-        <p className="text-muted-foreground">从行程、对话或外部游记中提取旅行风格，确认后发布到广场。</p>
-      </div>
-      <SkillCreatorSteps hasSource={sourceText.trim().length > 0} hasDraft={Boolean(draft)} />
-      <Card className="bg-white">
-        <CardHeader>
-          <CardTitle>来源文本</CardTitle>
-          <CardDescription>粘贴攻略、游记，或从当前行程生成一份可编辑的风格来源。</CardDescription>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="outline" className="rounded-full" onClick={onUseCurrentItinerary}>
-              <MapPinned data-icon="inline-start" />
-              使用当前行程
-            </Button>
-          </div>
-          <Textarea
-            value={sourceText}
-            onChange={(event) => onSourceTextChange(event.target.value)}
-            className="min-h-56"
-            aria-label="旅行风格来源文本"
-          />
-          <Button onClick={onExtract}>
-            <WandSparkles data-icon="inline-start" />
-            提取为旅行风格草稿
-          </Button>
-        </CardContent>
-      </Card>
-      {draft && <SkillDraftEditor draft={draft} onPublish={onPublish} />}
-    </div>
-  );
-}
+  const [session, setSession] = useState<SkillCreatorSession | null>(null);
+  const [turn, setTurn] = useState<SkillCreatorTurn | null>(null);
+  const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
+  const [customAnswer, setCustomAnswer] = useState("");
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
 
-function SkillCreatorSteps({ hasSource, hasDraft }: { hasSource: boolean; hasDraft: boolean }) {
-  const steps = [
-    { label: "来源", complete: hasSource, active: !hasDraft },
-    { label: "提取", complete: hasDraft, active: !hasDraft && hasSource },
-    { label: "确认规则", complete: false, active: hasDraft },
-    { label: "发布", complete: false, active: false }
+  async function handleStart(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!sourceText.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await onStart();
+      setSession(result.session);
+      setTurn(result.turn);
+      setSelectedOptionIds([]);
+      setCustomAnswer("");
+      setAdvancedOpen(false);
+    } catch {
+      setError("创作助手暂时无法开始，请稍后重试。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleSubmitAnswer(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!session || !turn || busy) return;
+    if (!customAnswer.trim() && selectedOptionIds.length === 0) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await onCreatorReply(session.id, {
+        selectedOptionIds,
+        customAnswer: customAnswer.trim()
+      });
+      setSession(result.session);
+      setTurn(result.turn);
+      setSelectedOptionIds([]);
+      setCustomAnswer("");
+      setAdvancedOpen(false);
+    } catch {
+      setError("创作助手没有返回可用问题，请重试本题。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleOption(option: SkillCreatorOption) {
+    if (!turn?.mode) return;
+    setSelectedOptionIds((current) => {
+      if (turn.mode === "single") return current.includes(option.id) ? [] : [option.id];
+      return current.includes(option.id) ? current.filter((id) => id !== option.id) : [...current, option.id];
+    });
+  }
+
+  const showHeader = !session || !turn || turn.done;
+  const sourceCharacterCount = sourceText.trim().length;
+  const inspirationPins = [
+    {
+      title: "海边散步",
+      meta: "地点偏好",
+      icon: MapPin,
+      className: "min-h-[184px] bg-[linear-gradient(145deg,#dce9f1_0%,#eef4f5_38%,#8fb6c5_100%)] text-[#211922]"
+    },
+    {
+      title: "傍晚日落",
+      meta: "时间节奏",
+      icon: Clock3,
+      className: "min-h-[132px] bg-[linear-gradient(145deg,#ffcf78_0%,#f07f3c_52%,#9e321f_100%)] text-white"
+    },
+    {
+      title: "小店探索",
+      meta: "体验类型",
+      icon: Store,
+      className: "min-h-[118px] bg-[linear-gradient(145deg,#e5eee2_0%,#b8d1bd_52%,#5d8067_100%)] text-[#211922]"
+    },
+    {
+      title: "不要赶路",
+      meta: "避开安排",
+      icon: Check,
+      className: "min-h-[154px] bg-[linear-gradient(145deg,#f7f2e9_0%,#d9c7ad_48%,#5d5144_100%)] text-[#211922]"
+    }
   ];
 
   return (
-    <div className="grid gap-2 rounded-2xl border border-border bg-white p-3 md:grid-cols-4" aria-label="Skill 创作流程">
-      {steps.map((step, index) => (
-        <div
-          key={step.label}
-          className={cn(
-            "flex min-h-11 items-center gap-3 rounded-2xl px-3 text-sm font-bold",
-            step.active && "bg-[#f6f6f3] text-foreground",
-            !step.active && step.complete && "text-foreground",
-            !step.active && !step.complete && "text-muted-foreground"
-          )}
-        >
-          <span
-            className={cn(
-              "flex size-7 shrink-0 items-center justify-center rounded-full text-xs",
-              step.active && "bg-primary text-primary-foreground",
-              !step.active && step.complete && "bg-foreground text-background",
-              !step.active && !step.complete && "bg-secondary text-muted-foreground"
-            )}
-          >
-            {index + 1}
-          </span>
-          <span>{step.label}</span>
+    <main className="mx-auto flex h-[calc(100dvh-32px)] w-full min-w-0 max-w-7xl flex-col gap-5 overflow-auto overflow-x-hidden bg-white p-4 md:p-6">
+      {showHeader && (
+        <div className="shrink-0">
+          <h2 className="text-4xl font-black leading-none tracking-normal text-balance sm:text-5xl">创作 Skill</h2>
+          <p className="mt-3 max-w-3xl text-base font-semibold leading-7 text-muted-foreground md:text-lg">
+            把旅行经验交给创作助手，由它主持问题并生成可发布的旅行风格。
+          </p>
         </div>
-      ))}
-    </div>
+      )}
+
+      {!session || !turn ? (
+        <form className="grid min-w-0 gap-5 min-[1180px]:min-h-0 min-[1180px]:flex-1 min-[1180px]:grid-cols-[minmax(0,1.02fr)_minmax(320px,0.78fr)] min-[1180px]:items-stretch" onSubmit={handleStart}>
+          <section className="flex min-w-0 flex-col rounded-[16px] border border-[#dadad3] bg-[#fbfbf9] p-4 min-[1180px]:min-h-0 md:p-5">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xl font-black">来源材料</h3>
+                <p className="mt-1 max-w-xl text-sm font-semibold leading-6 text-muted-foreground">
+                  粘贴游记、攻略或旅行笔记，越具体越容易提炼出独特风格。
+                </p>
+              </div>
+              <Button type="button" variant="secondary" className="h-10 min-h-10 w-full shrink-0 rounded-full bg-[#e5e5e0] px-4 min-[560px]:w-auto" onClick={onUseCurrentItinerary} disabled={busy}>
+                <MapPinned data-icon="inline-start" />
+                使用当前行程
+              </Button>
+            </div>
+
+            <div className="mt-4 flex min-w-0 flex-col rounded-[16px] border border-[#dadad3] bg-white min-[1180px]:min-h-0 min-[1180px]:flex-1">
+              <Textarea
+                name="skill-source-text"
+                autoComplete="off"
+                value={sourceText}
+                onChange={(event) => onSourceTextChange(event.target.value)}
+                className="min-h-[168px] resize-none border-0 bg-transparent p-4 text-base font-semibold leading-8 shadow-none focus-visible:ring-0 sm:min-h-[220px] sm:p-5 min-[1180px]:min-h-[320px] min-[1180px]:flex-1"
+                aria-label="来源材料"
+                placeholder="例如：这次厦门旅行最喜欢沙坡尾海边散步、傍晚日落和小店探索，整体不要赶路…"
+                disabled={busy}
+              />
+              <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[#e5e5e0] px-4 py-3 text-xs font-bold text-muted-foreground">
+                <span>内容只用于生成旅行风格草稿</span>
+                <span>{sourceCharacterCount}/2000</span>
+              </div>
+            </div>
+
+            {error && <p className="mt-3 rounded-[16px] bg-red-50 px-4 py-3 text-sm font-bold text-destructive">{error}</p>}
+
+            <Button type="submit" className="mt-4 min-h-14 rounded-[16px] text-base font-black" disabled={!sourceText.trim() || busy}>
+              <Sparkles data-icon="inline-start" />
+              {busy ? "正在开始..." : "开始创作"}
+            </Button>
+          </section>
+
+          <aside className="min-h-0 min-w-0 rounded-[16px] bg-[#f6f6f3] p-4 md:p-5">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h3 className="text-xl font-black">灵感板</h3>
+              <p className="text-sm font-semibold text-muted-foreground">助手会从材料里提炼风格</p>
+            </div>
+            <div className="mt-4 flex min-h-0 min-w-0 snap-x gap-3 overflow-x-auto pb-1 min-[1180px]:grid min-[1180px]:grid-cols-2 min-[1180px]:overflow-visible min-[1180px]:pb-0">
+              {inspirationPins.map((pin, index) => {
+                const Icon = pin.icon;
+                return (
+                  <div
+                    key={pin.title}
+                    className={cn(
+                      "relative flex min-h-[104px] min-w-[168px] snap-start overflow-hidden rounded-[16px] p-3 min-[1180px]:min-w-0",
+                      index === 0 && "min-[1180px]:row-span-2",
+                      index === 3 && "min-[1180px]:row-span-2",
+                      pin.className
+                    )}
+                  >
+                    <div className="relative z-10 mt-auto max-w-full rounded-full bg-white/90 px-3 py-2 text-sm font-black text-[#211922] shadow-sm">
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <Icon className="size-4 shrink-0" />
+                        <span className="truncate">{pin.title}</span>
+                      </span>
+                    </div>
+                    <span className="absolute right-3 top-3 hidden rounded-full bg-white/80 px-2.5 py-1 text-[11px] font-black text-[#211922] min-[420px]:inline-flex">
+                      {pin.meta}
+                    </span>
+                  </div>
+                );
+              })}
+              <div className="min-w-[260px] snap-start rounded-[16px] border border-[#dadad3] bg-white p-4 min-[1180px]:col-span-2 min-[1180px]:min-w-0">
+                <div className="inline-flex max-w-full items-center gap-2 rounded-full bg-[#f6f6f3] px-3 py-2 text-sm font-black">
+                  <WandSparkles className="size-4 text-primary" />
+                  <span className="truncate">Agent 会继续追问</span>
+                </div>
+                <p className="mt-3 text-sm font-semibold leading-6 text-muted-foreground">
+                  你只需要回答它给出的选择题；它会判断信息是否足够，再生成最终可检查的旅行风格。
+                </p>
+              </div>
+            </div>
+          </aside>
+        </form>
+      ) : turn.done ? (
+        <SkillCreatorFinalReview
+          session={session}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={() => setAdvancedOpen((open) => !open)}
+          onPublish={onPublish}
+        />
+      ) : (
+        <form className="flex min-h-0 flex-1 flex-col gap-5 rounded-xl border border-border bg-white p-5" onSubmit={handleSubmitAnswer}>
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-sm font-black text-muted-foreground">创作助手</div>
+            <div className="flex min-w-48 items-center gap-2" aria-label={`创作进度 ${turn.progressPercent}%`}>
+              <div className="h-2 flex-1 overflow-hidden rounded-full bg-secondary">
+                <div className="h-full rounded-full bg-primary" style={{ width: `${turn.progressPercent}%` }} />
+              </div>
+              <span className="text-sm font-black">{turn.progressPercent}%</span>
+            </div>
+          </div>
+          <div>
+            <h3 className="text-3xl font-black leading-tight">{turn.question}</h3>
+          </div>
+          <div className="grid gap-3">
+            {(turn.options ?? []).map((option) => {
+              const selected = selectedOptionIds.includes(option.id);
+              return (
+                <Button
+                  key={option.id}
+                  type="button"
+                  variant={selected ? "default" : "outline"}
+                  className="h-auto justify-start rounded-xl px-4 py-4 text-left text-base leading-6"
+                  onClick={() => toggleOption(option)}
+                  disabled={busy}
+                >
+                  {option.label}
+                </Button>
+              );
+            })}
+          </div>
+          <label className="grid gap-2 text-sm font-black text-muted-foreground">
+            补充答案
+            <Input
+              value={customAnswer}
+              onChange={(event) => setCustomAnswer(event.target.value)}
+              aria-label="补充答案"
+              placeholder={turn.customPlaceholder ?? "也可以写自己的答案"}
+              disabled={busy}
+            />
+          </label>
+          {error && <p className="text-sm font-bold text-destructive">{error}</p>}
+          <div className="mt-auto flex justify-end border-t border-border pt-4">
+            <Button type="submit" className="rounded-xl" disabled={busy || (!customAnswer.trim() && selectedOptionIds.length === 0)}>
+              <Send data-icon="inline-start" />
+              {busy ? "提交中..." : "提交回答"}
+            </Button>
+          </div>
+        </form>
+      )}
+    </main>
   );
 }
 
-function SkillDraftEditor({
-  draft,
+function SkillCreatorFinalReview({
+  session,
+  advancedOpen,
+  onToggleAdvanced,
   onPublish
 }: {
-  draft: TravelSkill;
+  session: SkillCreatorSession;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
   onPublish: (changes: Partial<TravelSkill>) => void;
 }) {
+  const draft = session.draft;
   const [displayName, setDisplayName] = useState(draft.displayName);
-  const [description, setDescription] = useState(draft.description);
   const [tags, setTags] = useState(draft.tags.join(","));
-  const [body, setBody] = useState(stripManagedSkillSections(draft.body));
+  const [description, setDescription] = useState(draft.description);
   const [rules, setRules] = useState(draft.rules.join("\n"));
   const [forbidden, setForbidden] = useState(draft.forbidden.join("\n"));
-  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [body, setBody] = useState(draft.body);
+  const editedSkill: TravelSkill = {
+    ...draft,
+    displayName,
+    description,
+    body,
+    tags: splitTagInput(tags),
+    rules: splitLines(rules),
+    forbidden: splitLines(forbidden)
+  };
+  const markdown = buildSkillMarkdown({
+    name: draft.name,
+    description: editedSkill.description,
+    body: editedSkill.body,
+    tags: editedSkill.tags,
+    rules: editedSkill.rules,
+    forbidden: editedSkill.forbidden
+  });
+  const validation = validateSkillMarkdown(markdown);
+  const hasDisplayName = displayName.trim().length > 0;
+  const canPublish = validation.valid && hasDisplayName;
 
   useEffect(() => {
     setDisplayName(draft.displayName);
-    setDescription(draft.description);
     setTags(draft.tags.join(","));
-    setBody(stripManagedSkillSections(draft.body));
+    setDescription(draft.description);
     setRules(draft.rules.join("\n"));
     setForbidden(draft.forbidden.join("\n"));
-    setAdvancedOpen(false);
+    setBody(draft.body);
   }, [draft.id]);
 
-  const preview = [
-    "---",
-    `name: ${draft.name}`,
-    `description: ${description}`,
-    `tags: [${splitTagInput(tags).map((tag) => `"${tag}"`).join(", ")}]`,
-    "---",
-    "",
-    `# ${displayName}`,
-    "",
-    body,
-    "",
-    "## 规划规则",
-    ...splitLines(rules).map((rule) => `- ${rule}`),
-    "",
-    "## 禁止模式",
-    ...splitLines(forbidden).map((rule) => `- ${rule}`)
-  ].join("\n");
-  const validation = validateSkillMarkdown(preview);
-
   return (
-    <Card className="bg-white">
-      <CardHeader>
-        <CardTitle>确认规则</CardTitle>
-        <CardDescription>确认这个风格适合什么行程、会怎样影响规划，以及哪些安排应避免。</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4 md:grid-cols-2">
-        <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} aria-label="Skill 名称" />
-        <Input value={tags} onChange={(event) => setTags(event.target.value)} aria-label="Skill 标签" />
-        <Textarea
-          className="md:col-span-2"
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-          aria-label="Skill 说明"
-        />
-        <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-          规划规则
-          <Textarea
-            className="min-h-44 text-sm font-semibold text-foreground"
-            value={rules}
-            onChange={(event) => setRules(event.target.value)}
-            aria-label="规划规则"
-          />
-        </label>
-        <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-          避免安排
-          <Textarea
-            className="min-h-44 text-sm font-semibold text-foreground"
-            value={forbidden}
-            onChange={(event) => setForbidden(event.target.value)}
-            aria-label="禁止模式"
-          />
-        </label>
-        {!validation.valid && (
-          <div className="md:col-span-2">
-            <SkillValidationSummary title="发布检查" validation={validation} />
-          </div>
-        )}
-        <div className="md:col-span-2">
-          <Button type="button" variant="ghost" className="rounded-full px-3" onClick={() => setAdvancedOpen((open) => !open)}>
-            {advancedOpen ? <ChevronUp data-icon="inline-start" /> : <ChevronDown data-icon="inline-start" />}
-            {advancedOpen ? "收起高级内容" : "编辑高级内容"}
-          </Button>
+    <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto rounded-xl border border-border bg-white p-5" aria-label="最终检查">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-black text-muted-foreground">最终检查</p>
+          <h3 className="mt-1 text-2xl font-black">{editedSkill.displayName}</h3>
+          <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-muted-foreground">{editedSkill.description}</p>
         </div>
-        {advancedOpen && (
-          <div className="grid gap-3 rounded-2xl border border-border bg-[#fbfbf9] p-3 md:col-span-2">
-            <Textarea
-              className="min-h-36 bg-white"
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
-              aria-label="Skill 正文"
-            />
-            <pre className="max-h-72 overflow-auto rounded-2xl bg-secondary p-4 text-xs leading-6">
-              {preview}
-            </pre>
-          </div>
-        )}
         <Button
-          className="md:col-span-2"
-          disabled={!validation.valid}
-          onClick={() =>
-            onPublish({
-              displayName,
-              description,
-              tags: splitTagInput(tags),
-              body,
-              rules: splitLines(rules),
-              forbidden: splitLines(forbidden)
-            })
-          }
+          type="button"
+          className="rounded-xl"
+          disabled={!canPublish}
+          onClick={() => {
+            if (!canPublish) return;
+            onPublish({ ...editedSkill, displayName: displayName.trim() });
+          }}
         >
           <Sparkles data-icon="inline-start" />
           发布到广场
         </Button>
-      </CardContent>
-    </Card>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 rounded-xl bg-[#fbfbf9] p-4">
+          <p className="text-xs font-black text-muted-foreground">标签</p>
+          <div className="flex flex-wrap gap-2">
+            {editedSkill.tags.map((tag) => (
+              <Badge key={tag} className="bg-white text-foreground">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+          <p className="text-xs font-black text-muted-foreground">摘要</p>
+          <p className="text-sm font-semibold leading-6 text-foreground">{editedSkill.body}</p>
+        </div>
+        <div className="grid gap-3 rounded-xl bg-[#fbfbf9] p-4">
+          <p className="text-xs font-black text-muted-foreground">规则</p>
+          <ul className="grid gap-2 text-sm font-semibold leading-6 text-foreground">
+            {editedSkill.rules.map((rule) => (
+              <li key={rule}>{rule}</li>
+            ))}
+          </ul>
+          {editedSkill.forbidden.length > 0 && (
+            <>
+              <p className="text-xs font-black text-muted-foreground">避免</p>
+              <ul className="grid gap-2 text-sm font-semibold leading-6 text-foreground">
+                {editedSkill.forbidden.map((rule) => (
+                  <li key={rule}>{rule}</li>
+                ))}
+              </ul>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="grid gap-3 border-t border-border pt-4">
+        <Button type="button" variant="outline" className="w-fit rounded-xl" onClick={onToggleAdvanced}>
+          {advancedOpen ? <ChevronUp data-icon="inline-start" /> : <ChevronDown data-icon="inline-start" />}
+          {advancedOpen ? "收起最终 Skill 产物" : "展开最终 Skill 产物"}
+        </Button>
+        {advancedOpen && (
+          <div className="grid gap-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                Skill 名称
+                <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} aria-label="Skill 名称" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                Skill 标签
+                <Input value={tags} onChange={(event) => setTags(event.target.value)} aria-label="Skill 标签" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground md:col-span-2">
+                Skill 说明
+                <Textarea
+                  className="min-h-24 bg-white"
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  aria-label="Skill 说明"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                规划规则
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={rules}
+                  onChange={(event) => setRules(event.target.value)}
+                  aria-label="规划规则"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                不希望出现的安排
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={forbidden}
+                  onChange={(event) => setForbidden(event.target.value)}
+                  aria-label="不希望出现的安排"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground md:col-span-2">
+                Skill 正文
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  aria-label="Skill 正文"
+                />
+              </label>
+            </div>
+            <p className="text-xs font-bold text-muted-foreground">SKILL.md 预览包含 frontmatter 和正文。</p>
+            {!validation.valid && <SkillValidationSummary title="发布检查" validation={validation} />}
+            <pre className="max-h-80 overflow-auto rounded-xl bg-secondary p-4 text-xs leading-6">{markdown}</pre>
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -7362,308 +8391,146 @@ function skillContentChanges(changes: Partial<TravelSkill>): SkillContentChanges
   return contentChanges;
 }
 
-function stripManagedSkillSections(value: string): string {
-  const lines = value.split(/\r?\n/);
-  const kept: string[] = [];
-  let skippingManagedSection = false;
-  for (const line of lines) {
-    const heading = line.trim();
-    if (heading === "## 规划规则" || heading === "## 禁止模式") {
-      skippingManagedSection = true;
-      continue;
-    }
-    if (heading.startsWith("## ")) {
-      skippingManagedSection = false;
-    }
-    if (!skippingManagedSection) kept.push(line);
-  }
-  return kept.join("\n").trim();
-}
-
-function PreferenceSettings({
-  itinerary,
-  agentMemory,
-  onSavePreferences,
-  onClearMemory
+function SavedMemorySettings({
+  memories,
+  onCreateMemory,
+  onUpdateMemory,
+  onDeleteMemory
 }: {
-  itinerary: TravelItinerary;
-  agentMemory: AgentMemory | null;
-  onSavePreferences: (preferences: string[]) => void | Promise<void>;
-  onClearMemory: () => void | Promise<void>;
+  memories: SavedMemory[];
+  onCreateMemory: (content: string) => void | Promise<void>;
+  onUpdateMemory: (memoryId: string, content: string) => void | Promise<void>;
+  onDeleteMemory: (memoryId: string) => void | Promise<void>;
 }) {
-  const [preferenceText, setPreferenceText] = useState(itinerary.preferences.join(", "));
-  const [newPreference, setNewPreference] = useState("");
-  const [customPreferenceType, setCustomPreferenceType] = useState("");
-  const [customPreferenceItems, setCustomPreferenceItems] = useState("");
-  const preferences = parsePreferenceText(preferenceText);
-  const preferenceSummary = preferences.length ? preferences.join("、") : "暂无行程偏好";
-  const preferenceGroups = groupTravelPreferences(preferences);
-  const preferenceEvidence = buildPreferenceEvidence(preferences, preferenceGroups, agentMemory);
+  const [query, setQuery] = useState("");
+  const [newMemory, setNewMemory] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingContent, setEditingContent] = useState("");
+  const visibleMemories = memories.filter((memory) => memory.content.toLowerCase().includes(query.trim().toLowerCase()));
 
-  useEffect(() => {
-    setPreferenceText(itinerary.preferences.join(", "));
-    setNewPreference("");
-    setCustomPreferenceType("");
-    setCustomPreferenceItems("");
-  }, [itinerary.id, itinerary.preferences.join("|")]);
-
-  function savePreferences() {
-    void onSavePreferences(preferences);
+  async function createMemory() {
+    const content = newMemory.trim();
+    if (!content) return;
+    await onCreateMemory(content);
+    setNewMemory("");
   }
 
-  function removePreference(preference: string) {
-    setPreferenceText(preferences.filter((item) => item !== preference).join(", "));
+  function startEditing(memory: SavedMemory) {
+    setEditingId(memory.id);
+    setEditingContent(memory.content);
   }
 
-  function clearPreferenceGroup(group: PreferenceGroupView) {
-    if (!group.items.length) return;
-    const removed = new Set(group.items);
-    setPreferenceText(preferences.filter((item) => !removed.has(item)).join(", "));
+  function cancelEditing() {
+    setEditingId(null);
+    setEditingContent("");
   }
 
-  function addPreference() {
-    const next = parsePreferenceText(newPreference);
-    if (!next.length) return;
-    setPreferenceText([...new Set([...preferences, ...next])].join(", "));
-    setNewPreference("");
-  }
-
-  function addCustomPreferenceType() {
-    const type = customPreferenceType.trim();
-    const items = parsePreferenceText(customPreferenceItems);
-    if (!type || !items.length) return;
-    const next = items.map((item) => `${type}：${item}`);
-    setPreferenceText([...new Set([...preferences, ...next])].join(", "));
-    setCustomPreferenceType("");
-    setCustomPreferenceItems("");
+  async function saveEditing() {
+    if (!editingId || !editingContent.trim()) return;
+    await onUpdateMemory(editingId, editingContent.trim());
+    cancelEditing();
   }
 
   return (
     <div className="min-h-screen overflow-auto bg-[#fbfbf9] p-6">
       <div className="mb-6">
-        <h2 className="text-3xl font-black">偏好设置</h2>
-        <p className="mt-1 text-muted-foreground">管理本次行程会参考的旅行偏好和助手会话记忆。</p>
+        <h2 className="text-3xl font-black">保存的记忆</h2>
+        <p className="mt-1 text-muted-foreground">用一条一条的记录保存长期有效的偏好和禁忌，供后续规划直接复用。</p>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-        <Card className="bg-white">
-          <CardHeader>
-            <CardTitle>行程偏好</CardTitle>
-            <CardDescription>这些偏好会影响风格推荐、助手建议、地点取舍和路线调整。</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4">
-            <div className="grid gap-3 rounded-2xl bg-[#fbfbf9] p-3 sm:grid-cols-[minmax(0,1fr)_auto]">
-              <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-muted-foreground">
-                快速添加
-                <Input
-                  value={newPreference}
-                  onChange={(event) => setNewPreference(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      addPreference();
-                    }
-                  }}
-                  aria-label="添加行程偏好"
-                  placeholder="例如：少走路、夜景、博物馆"
-                />
-              </label>
-              <Button type="button" variant="secondary" className="self-end rounded-full" onClick={addPreference} aria-label="添加偏好">
-                添加
-              </Button>
-            </div>
-            <section className="grid gap-3 rounded-2xl border border-border bg-white p-3" aria-label="添加自定义偏好类型">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-black">自定义偏好类型</p>
-                  <p className="mt-1 text-xs font-semibold text-muted-foreground">用于添加节奏、地点、交通之外的分类，例如亲子、拍照、购物。</p>
-                </div>
-                <Badge className="bg-[#f6f6f3] text-foreground">新类型</Badge>
-              </div>
-              <div className="grid gap-2 md:grid-cols-[180px_minmax(0,1fr)_auto]">
-                <Input
-                  value={customPreferenceType}
-                  onChange={(event) => setCustomPreferenceType(event.target.value)}
-                  aria-label="自定义偏好类型名称"
-                  placeholder="类型，例如亲子"
-                />
-                <Input
-                  value={customPreferenceItems}
-                  onChange={(event) => setCustomPreferenceItems(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      addCustomPreferenceType();
-                    }
-                  }}
-                  aria-label="自定义偏好内容"
-                  placeholder="偏好，例如儿童友好餐厅、少排队"
-                />
-                <Button type="button" variant="secondary" className="rounded-full" onClick={addCustomPreferenceType}>
-                  添加类型
-                </Button>
-              </div>
-            </section>
-            <div className="grid gap-3 md:grid-cols-2" aria-label="结构化行程偏好">
-              {preferenceGroups.map((group) => (
-                <section key={group.id} className="rounded-2xl border border-border bg-white p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-black">{group.label}</p>
-                      <p className="mt-1 text-xs font-semibold text-muted-foreground">{group.description}</p>
-                    </div>
-                    <div className="flex shrink-0 items-center gap-1.5">
-                      {group.items.length > 0 && (
+      <Card className="bg-white">
+        <CardHeader>
+          <CardTitle>记忆列表</CardTitle>
+          <CardDescription>支持搜索、新增、手动编辑和删除。助手会读取这些记忆，并在需要时精确修改其中某一条。</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-muted-foreground">
+              搜索记忆
+              <Input value={query} onChange={(event) => setQuery(event.target.value)} aria-label="搜索记忆" placeholder="按关键词过滤已保存记忆" />
+            </label>
+            <div className="self-end rounded-full bg-[#f6f6f3] px-3 py-2 text-xs font-bold text-muted-foreground">{visibleMemories.length} 条</div>
+          </div>
+
+          <div className="grid gap-3 rounded-2xl bg-[#fbfbf9] p-3 md:grid-cols-[minmax(0,1fr)_auto]">
+            <label className="flex min-w-0 flex-col gap-1 text-xs font-bold text-muted-foreground">
+              新增记忆
+              <Input
+                value={newMemory}
+                onChange={(event) => setNewMemory(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void createMemory();
+                  }
+                }}
+                aria-label="新增记忆"
+                placeholder="例如：用户不喜欢连续跨区。"
+              />
+            </label>
+            <Button type="button" variant="secondary" className="self-end rounded-full" onClick={() => void createMemory()}>
+              保存记忆
+            </Button>
+          </div>
+
+          <div className="overflow-hidden rounded-2xl border border-border bg-white">
+            {visibleMemories.length > 0 ? (
+              visibleMemories.map((memory, index) => (
+                <div
+                  key={memory.id}
+                  className={cn("grid gap-3 px-4 py-4", index > 0 && "border-t border-border")}
+                >
+                  {editingId === memory.id ? (
+                    <>
+                      <Input
+                        value={editingContent}
+                        onChange={(event) => setEditingContent(event.target.value)}
+                        aria-label="编辑记忆内容"
+                      />
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        <Button type="button" variant="ghost" className="rounded-full" onClick={cancelEditing}>
+                          取消修改
+                        </Button>
+                        <Button type="button" variant="secondary" className="rounded-full" onClick={() => void saveEditing()}>
+                          保存修改
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <p className="min-w-0 flex-1 text-sm font-semibold leading-7 text-foreground">{memory.content}</p>
+                      <div className="flex shrink-0 items-center gap-2">
                         <Button
                           type="button"
                           variant="ghost"
-                          size="sm"
-                          className="min-h-8 rounded-full px-2 text-xs"
-                          onClick={() => clearPreferenceGroup(group)}
-                          aria-label={`清除${group.label}偏好`}
+                          size="icon"
+                          className="rounded-full"
+                          aria-label={`编辑记忆 ${memory.content}`}
+                          onClick={() => startEditing(memory)}
                         >
-                          清空本类
+                          <Pencil className="size-4" />
                         </Button>
-                      )}
-                      <Badge className="bg-[#f6f6f3] text-foreground">{group.items.length}</Badge>
-                    </div>
-                  </div>
-                  <div className="mt-3 flex min-h-9 flex-wrap gap-2">
-                    {group.items.length ? (
-                      group.items.map((preference) => (
-                        <span
-                          key={preference}
-                          className="inline-flex min-h-8 items-center gap-1 rounded-full bg-[#f6f6f3] pl-3 pr-1 text-xs font-bold text-foreground"
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="rounded-full text-destructive hover:text-destructive"
+                          aria-label={`删除记忆 ${memory.content}`}
+                          onClick={() => void onDeleteMemory(memory.id)}
                         >
-                          {preference}
-                          <button
-                            type="button"
-                            className="inline-flex size-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                            onClick={() => removePreference(preference)}
-                            aria-label={`移除偏好 ${preference}`}
-                          >
-                            <X className="size-4" />
-                          </button>
-                        </span>
-                      ))
-                    ) : (
-                      <span className="rounded-full bg-[#f6f6f3] px-3 py-1 text-xs font-semibold text-muted-foreground">
-                        暂无
-                      </span>
-                    )}
-                  </div>
-                </section>
-              ))}
-            </div>
-            <label className="flex flex-col gap-1 text-xs font-bold text-muted-foreground">
-              批量编辑行程偏好
-              <Textarea
-                value={preferenceText}
-                onChange={(event) => setPreferenceText(event.target.value)}
-                aria-label="行程偏好"
-                placeholder="例如：慢节奏, 咖啡, 少走路"
-              />
-            </label>
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl bg-[#f6f6f3] px-3 py-2">
-              <p className="text-sm font-semibold text-muted-foreground">{preferenceSummary}</p>
-              <Button type="button" variant="secondary" className="rounded-full" onClick={savePreferences}>
-                保存偏好
-              </Button>
-            </div>
-            {preferenceEvidence.length > 0 && (
-              <section role="region" aria-label="偏好来源明细" className="grid gap-2 rounded-2xl border border-border bg-white p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-black">偏好来源明细</p>
-                    <p className="mt-1 text-xs font-semibold text-muted-foreground">查看每条偏好会如何影响后续规划。</p>
-                  </div>
-                  <Badge className="bg-[#f6f6f3] text-foreground">{preferenceEvidence.length} 条</Badge>
-                </div>
-                <div className="grid gap-2 md:grid-cols-2">
-                  {preferenceEvidence.map((item) => (
-                    <div
-                      key={item.preference}
-                      data-testid={`preference-evidence-${item.preference}`}
-                      className="grid gap-2 rounded-xl bg-[#fbfbf9] p-3 text-sm"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <p className="font-black">{item.preference}</p>
-                        <Badge className="bg-white text-foreground">{item.latestUse}</Badge>
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {item.sources.map((source) => (
-                          <span key={source} className="rounded-full bg-white px-2 py-1 text-xs font-bold text-muted-foreground">
-                            {source}
-                          </span>
-                        ))}
+                          <Trash2 className="size-4" />
+                        </Button>
                       </div>
                     </div>
-                  ))}
-                </div>
-              </section>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card className="bg-white">
-          <CardHeader>
-            <CardTitle>会话记忆</CardTitle>
-            <CardDescription>只用于当前行程，帮助助手理解最近对话、已导入风格和用户偏好。</CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            {agentMemory ? (
-              <>
-                <div className="flex flex-wrap gap-2">
-                  <Badge className="bg-[#f6f6f3] text-foreground">{agentMemory.sessionCount} 次对话</Badge>
-                  <Badge className="bg-[#f6f6f3] text-foreground">当前行程范围</Badge>
-                  {agentMemory.latestUpdatedAt && (
-                    <Badge className="bg-[#f6f6f3] text-foreground">
-                      最近更新 {formatCompactDateTime(agentMemory.latestUpdatedAt)}
-                    </Badge>
                   )}
-                  {agentMemory.preferenceSummary && <Badge className="bg-[#f6f6f3] text-foreground">已形成偏好摘要</Badge>}
                 </div>
-                <section className="rounded-2xl bg-[#fbfbf9] p-3">
-                  <p className="text-xs font-black text-muted-foreground">来源</p>
-                  <p className="mt-1 text-sm font-semibold">
-                    最近 {agentMemory.sessionCount} 次当前行程对话、已导入风格和行程偏好。
-                  </p>
-                </section>
-                {agentMemory.preferenceSummary && (
-                  <section className="rounded-2xl bg-[#fbfbf9] p-3">
-                    <p className="text-xs font-black text-muted-foreground">偏好摘要</p>
-                    <p className="mt-1 text-sm font-semibold">{agentMemory.preferenceSummary}</p>
-                  </section>
-                )}
-                {agentMemory.contextSummary && (
-                  <section className="rounded-2xl bg-[#fbfbf9] p-3">
-                    <p className="text-xs font-black text-muted-foreground">最近对话</p>
-                    <p className="mt-1 text-sm font-semibold">{agentMemory.contextSummary}</p>
-                  </section>
-                )}
-                <section className="rounded-2xl bg-[#fbfbf9] p-3">
-                  <p className="text-xs font-black text-muted-foreground">影响范围</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {["助手回复", "风格融合", "地点取舍", "路线调整"].map((scope) => (
-                      <Badge key={scope} className="bg-white text-foreground">
-                        {scope}
-                      </Badge>
-                    ))}
-                  </div>
-                </section>
-                <Button type="button" variant="outline" className="rounded-full" onClick={() => void onClearMemory()}>
-                  清除会话记忆
-                </Button>
-              </>
+              ))
             ) : (
-              <div className="rounded-2xl bg-[#f6f6f3] px-3 py-4 text-sm font-semibold text-muted-foreground">
-                <p className="text-foreground">暂无会话记忆</p>
-                <p className="mt-1 text-xs">助手会先参考上方行程偏好；产生对话后，这里会显示来源和最近影响。</p>
-              </div>
+              <div className="px-4 py-10 text-center text-sm font-semibold text-muted-foreground">还没有匹配的记忆。</div>
             )}
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -7687,15 +8554,22 @@ function EvaluationPage() {
   useEffect(() => {
     let cancelled = false;
     async function loadAgentEvidence() {
-      const [sessionResult, traceResult, skillResult] = await Promise.all([
-        apiGet<{ items: AgentSession[] }>("/agent/sessions", { items: [] }),
-        apiGet<{ items: AgentTraceEvent[] }>("/agent/traces", { items: [] }),
-        apiGet<{ items: TravelSkill[] }>("/skills", { items: createSeedSkills() })
-      ]);
-      if (cancelled) return;
-      setSessions(sortAgentSessions(sessionResult.items));
-      setTraces(sortAgentTraces(traceResult.items));
-      setSkills(skillResult.items);
+      try {
+        const [sessionResult, traceResult, skillResult] = await Promise.all([
+          apiGet<{ items: AgentSession[] }>("/agent/sessions"),
+          apiGet<{ items: AgentTraceEvent[] }>("/agent/traces"),
+          apiGet<{ items: TravelSkill[] }>("/skills")
+        ]);
+        if (cancelled) return;
+        setSessions(sortAgentSessions(sessionResult.items));
+        setTraces(sortAgentTraces(traceResult.items));
+        setSkills(skillResult.items);
+      } catch {
+        if (cancelled) return;
+        setSessions([]);
+        setTraces([]);
+        setSkills([]);
+      }
     }
     void loadAgentEvidence();
     return () => {
@@ -7738,7 +8612,7 @@ function EvaluationPage() {
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <CardTitle>最近 Agent 运行</CardTitle>
-                <CardDescription>展示真实会话中的上下文读取、偏好摘要和导入风格。</CardDescription>
+                <CardDescription>展示真实会话中的上下文读取、记忆快照和导入风格。</CardDescription>
               </div>
               <Badge className="bg-[#f6f6f3] text-foreground">{sessions.length} 次会话</Badge>
             </div>
@@ -7748,7 +8622,7 @@ function EvaluationPage() {
               <div className="grid gap-4">
                 <div className="grid gap-3 sm:grid-cols-2">
                   <EvidenceBlock label="上下文摘要" value={latestSession.contextSummary ?? "暂无上下文摘要"} />
-                  <EvidenceBlock label="偏好摘要" value={latestSession.userPreferenceSummary ?? "暂无偏好摘要"} />
+                  <EvidenceBlock label="记忆快照" value={latestSession.memorySnapshotText ?? "暂无记忆快照"} />
                 </div>
                 <div>
                   <p className="text-xs font-black text-muted-foreground">导入风格</p>

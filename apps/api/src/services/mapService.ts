@@ -107,29 +107,29 @@ export class MapService {
 
 function mockPoi(keywords: string, city: string): PoiResult[] {
   return [
-      {
-        id: `mock-${keywords}`,
-        name: keywords,
-        address: `${city}市核心区域`,
-        city,
-        district: `${city}市`,
-        type: inferMockPoiType(keywords),
-        openingHours: inferMockOpeningHours(keywords),
-        averageCostCny: inferMockAverageCost(keywords),
-        location: { lng: 120.1551, lat: 30.2741 },
-        source: "mock"
-      },
-      {
-        id: `mock-${keywords}-2`,
-        name: `${keywords}周边`,
-        address: `${city}市步行可达区域`,
-        city,
-        district: `${city}市`,
-        type: "周边地点",
-        openingHours: "10:00-18:00",
-        location: { lng: 120.16, lat: 30.27 },
-        source: "mock"
-      }
+    {
+      id: `mock-${keywords}`,
+      name: keywords,
+      address: `${city}市核心区域`,
+      city,
+      district: `${city}市`,
+      type: inferMockPoiType(keywords),
+      openingHours: inferMockOpeningHours(keywords),
+      averageCostCny: inferMockAverageCost(keywords),
+      location: { lng: 120.1551, lat: 30.2741 },
+      source: "mock"
+    },
+    {
+      id: `mock-${keywords}-2`,
+      name: `${keywords}周边`,
+      address: `${city}市步行可达区域`,
+      city,
+      district: `${city}市`,
+      type: "周边地点",
+      openingHours: "10:00-18:00",
+      location: { lng: 120.16, lat: 30.27 },
+      source: "mock"
+    }
   ];
 }
 
@@ -178,6 +178,12 @@ function normalizePhotos(value: unknown): Array<{ title?: string; url: string }>
     return [{ title, url }];
   });
   return photos.length > 0 ? photos : undefined;
+}
+
+async function fetchAmap<T>(url: URL): Promise<T> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Amap request failed: ${response.status}`);
+  return (await response.json()) as T;
 }
 
 function mockRoute(from: string, to: string, mode: MapRouteMode): RouteSummary {
@@ -240,12 +246,6 @@ function mockWeather(city: string, date: string): WeatherSummary {
     temperature: "24-30 C",
     source: "mock"
   };
-}
-
-async function fetchAmap<T>(url: URL): Promise<T> {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Amap request failed: ${response.status}`);
-  return (await response.json()) as T;
 }
 
 function routeUrl(mode: MapRouteMode): URL {
