@@ -36,7 +36,37 @@ export const SkillCreatorTurnSchema = z
     done: z.boolean()
   })
   .superRefine((turn, context) => {
-    if (turn.done) return;
+    if (turn.done) {
+      if (turn.progressPercent !== 100) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["progressPercent"],
+          message: "completed turns must have progressPercent 100"
+        });
+      }
+      if (turn.question) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["question"],
+          message: "completed turns must not include a question"
+        });
+      }
+      if (turn.mode) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["mode"],
+          message: "completed turns must not include a mode"
+        });
+      }
+      if (turn.options && turn.options.length > 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["options"],
+          message: "completed turns must not include options"
+        });
+      }
+      return;
+    }
     if (!turn.question) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -68,6 +98,13 @@ export const SkillCreatorAnswerSchema = z.object({
 });
 
 export type SkillCreatorAnswer = z.infer<typeof SkillCreatorAnswerSchema>;
+
+export class SkillCreatorAnswerValidationError extends Error {
+  constructor(readonly issues: string[]) {
+    super(`Invalid skill creator answer: ${issues.join("; ")}`);
+    this.name = "SkillCreatorAnswerValidationError";
+  }
+}
 
 export const SkillCreatorHistoryItemSchema = z.object({
   question: z.string(),
@@ -143,12 +180,46 @@ export function isSkillCreatorDraftReady(skill: TravelSkill): boolean {
   return validateSkillMarkdown(markdown).valid;
 }
 
+export function validateSkillCreatorAnswerForTurn(
+  turn: SkillCreatorTurn,
+  answer: SkillCreatorAnswer
+): SkillCreatorAnswer {
+  const parsed = SkillCreatorAnswerSchema.parse(answer);
+  const selectedOptionIds = unique(parsed.selectedOptionIds);
+  const customAnswer = parsed.customAnswer.trim();
+  const validOptionIds = new Set((turn.options ?? []).map((option) => option.id));
+  const issues: string[] = [];
+
+  if (selectedOptionIds.length === 0 && !customAnswer) {
+    issues.push("select at least one option or provide a custom answer");
+  }
+
+  const invalidOptionIds = selectedOptionIds.filter((optionId) => !validOptionIds.has(optionId));
+  if (invalidOptionIds.length > 0) {
+    issues.push(`selected option ids are not available on this turn: ${invalidOptionIds.join(", ")}`);
+  }
+
+  if (turn.mode === "single" && selectedOptionIds.length > 1) {
+    issues.push("single-choice turns can record only one selected option id");
+  }
+
+  if (issues.length > 0) {
+    throw new SkillCreatorAnswerValidationError(issues);
+  }
+
+  return {
+    selectedOptionIds,
+    customAnswer
+  };
+}
+
 export function recordSkillCreatorAnswer(
   session: SkillCreatorSession,
   answer: SkillCreatorAnswer
 ): SkillCreatorSession {
   if (!session.currentTurn || session.currentTurn.done) return session;
   const timestamp = nowIso();
+  const validatedAnswer = validateSkillCreatorAnswerForTurn(session.currentTurn, answer);
   return {
     ...session,
     history: [
@@ -157,8 +228,8 @@ export function recordSkillCreatorAnswer(
         question: session.currentTurn.question ?? "",
         mode: session.currentTurn.mode ?? "single",
         options: session.currentTurn.options ?? [],
-        selectedOptionIds: answer.selectedOptionIds,
-        customAnswer: answer.customAnswer,
+        selectedOptionIds: validatedAnswer.selectedOptionIds,
+        customAnswer: validatedAnswer.customAnswer,
         progressPercent: session.currentTurn.progressPercent,
         createdAt: timestamp
       }

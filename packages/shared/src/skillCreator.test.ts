@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   SkillCreatorTurnSchema,
   applySkillCreatorDraftPatch,
-  isSkillCreatorDraftReady
+  createSkillCreatorSession,
+  isSkillCreatorDraftReady,
+  recordSkillCreatorAnswer
 } from "./skillCreator";
 import type { TravelSkill } from "./types";
 
@@ -23,6 +25,20 @@ const baseSkill: TravelSkill = {
   createdAt: "2026-06-16T00:00:00.000Z",
   updatedAt: "2026-06-16T00:00:00.000Z"
 };
+
+const activeQuestionTurn = SkillCreatorTurnSchema.parse({
+  assistantMessage: "我先确认哪些体验最重要。",
+  question: "这套旅行风格换到新城市时，哪些体验必须保留？",
+  mode: "multiple",
+  options: [
+    { id: "sunset", label: "傍晚留给散步和日落" },
+    { id: "shops", label: "优先找小店和街区" },
+    { id: "light", label: "每天最多两个核心点" }
+  ],
+  progressPercent: 52,
+  draftPatch: {},
+  done: false
+});
 
 describe("skill creator contract", () => {
   it("accepts an in-progress question turn with choice options and progress", () => {
@@ -78,6 +94,42 @@ describe("skill creator contract", () => {
     expect(parsed.question).toBeUndefined();
   });
 
+  it("rejects completed turns below full progress", () => {
+    const result = SkillCreatorTurnSchema.safeParse({
+      assistantMessage: "这版已经可以进入最终检查。",
+      progressPercent: 90,
+      draftPatch: {},
+      done: true
+    });
+
+    expect(result.success).toBe(false);
+  });
+
+  it.each([
+    ["question", { question: "还要不要保留日落散步？" }],
+    ["mode", { mode: "single" }],
+    [
+      "options",
+      {
+        options: [
+          { id: "yes", label: "保留" },
+          { id: "no", label: "不保留" },
+          { id: "custom", label: "我再补充" }
+        ]
+      }
+    ]
+  ])("rejects completed turns that still include %s", (_field, extraTurnFields) => {
+    const result = SkillCreatorTurnSchema.safeParse({
+      assistantMessage: "这版已经可以进入最终检查。",
+      progressPercent: 100,
+      draftPatch: {},
+      done: true,
+      ...extraTurnFields
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("merges draft patches without replacing omitted fields", () => {
     const merged = applySkillCreatorDraftPatch(baseSkill, {
       tags: ["小店", "松弛"],
@@ -95,5 +147,56 @@ describe("skill creator contract", () => {
     expect(isSkillCreatorDraftReady(baseSkill)).toBe(true);
     expect(isSkillCreatorDraftReady({ ...baseSkill, rules: [] })).toBe(false);
     expect(isSkillCreatorDraftReady({ ...baseSkill, description: "" })).toBe(false);
+  });
+
+  it("rejects answers with selected option ids outside the active turn", () => {
+    const session = createSkillCreatorSession({
+      id: "creator-session-test",
+      sourceText: "用户喜欢海边散步。",
+      draft: baseSkill,
+      currentTurn: activeQuestionTurn
+    });
+
+    expect(() =>
+      recordSkillCreatorAnswer(session, {
+        selectedOptionIds: ["missing-option"],
+        customAnswer: ""
+      })
+    ).toThrow();
+  });
+
+  it("rejects multiple selected ids for a single-choice turn", () => {
+    const session = createSkillCreatorSession({
+      id: "creator-session-test",
+      sourceText: "用户喜欢海边散步。",
+      draft: baseSkill,
+      currentTurn: {
+        ...activeQuestionTurn,
+        mode: "single"
+      }
+    });
+
+    expect(() =>
+      recordSkillCreatorAnswer(session, {
+        selectedOptionIds: ["sunset", "shops"],
+        customAnswer: ""
+      })
+    ).toThrow();
+  });
+
+  it("rejects answers without a selected option or custom text", () => {
+    const session = createSkillCreatorSession({
+      id: "creator-session-test",
+      sourceText: "用户喜欢海边散步。",
+      draft: baseSkill,
+      currentTurn: activeQuestionTurn
+    });
+
+    expect(() =>
+      recordSkillCreatorAnswer(session, {
+        selectedOptionIds: [],
+        customAnswer: ""
+      })
+    ).toThrow();
   });
 });
