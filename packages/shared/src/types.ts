@@ -259,6 +259,7 @@ export type AgentName =
   | "TransportAgent"
   | "AttractionAgent"
   | "PlannerAgent"
+  | "ContextAgent"
   | "CriticAgent";
 
 export type AgentTraceEvent = {
@@ -315,6 +316,13 @@ export type AgentSession = {
   traces: AgentTraceEvent[];
   contextSummary?: string;
   userPreferenceSummary?: string;
+  /**
+   * Cumulative summary of all sessions strictly older than this one for the
+   * same itinerary. Cached so that the next run can skip re-summarizing the
+   * same prefix. Set by ConversationContextService when it generated a
+   * summary for this run; absent when no summarization was needed.
+   */
+  historicalContextSummary?: string;
   memorySnapshotText?: string;
   createdAt: string;
   updatedAt: string;

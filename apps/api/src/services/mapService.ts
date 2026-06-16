@@ -1,5 +1,10 @@
 import type { MapRouteMode, RouteStep, RouteSummary, WeatherSummary } from "@journey/shared";
 
+export type RouteRequestOptions = {
+  originCity?: string;
+  destinationCity?: string;
+};
+
 export type PoiResult = {
   id: string;
   name: string;
@@ -57,7 +62,12 @@ export class MapService {
     return mockPoi(keywords, city);
   }
 
-  async route(from: string, to: string, mode: MapRouteMode = "walking"): Promise<RouteSummary> {
+  async route(
+    from: string,
+    to: string,
+    mode: MapRouteMode = "walking",
+    options: RouteRequestOptions = {}
+  ): Promise<RouteSummary> {
     const key = process.env.AMAP_WEB_SERVICE_KEY;
     if (key) {
       try {
@@ -65,7 +75,18 @@ export class MapService {
         url.searchParams.set("key", key);
         url.searchParams.set("origin", from);
         url.searchParams.set("destination", to);
-        if (mode === "transit") url.searchParams.set("city", "全国");
+        if (mode === "transit") {
+          const originCity = options.originCity?.trim();
+          const destinationCity = options.destinationCity?.trim();
+          if (originCity && destinationCity && originCity !== destinationCity) {
+            // Intercity transit (e.g. 苏州→上海) requires both city codes so Amap
+            // returns high-speed rail / coach options instead of urban-only buses.
+            url.searchParams.set("city", originCity);
+            url.searchParams.set("cityd", destinationCity);
+          } else {
+            url.searchParams.set("city", originCity || destinationCity || "全国");
+          }
+        }
         const data = await fetchAmap<AmapRouteResponse>(url);
         const route = normalizeAmapRoute(data, mode, from, to);
         if (route) return route;
