@@ -2943,6 +2943,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByLabelText("规划规则")).toHaveValue("每天最多两个核心安排\n傍晚留给小店和日落");
     expect(screen.getByLabelText("不希望出现的安排")).toHaveValue("避免连续跨区\n不要午后暴晒长距离步行");
     await user.clear(screen.getByLabelText("Skill 名称"));
+    expect(screen.getByRole("button", { name: "发布到广场" })).toBeDisabled();
     await user.type(screen.getByLabelText("Skill 名称"), "海边小店夜游风格");
     await user.clear(screen.getByLabelText("Skill 标签"));
     await user.type(screen.getByLabelText("Skill 标签"), "海边,夜游");

@@ -8416,6 +8416,8 @@ function SkillCreatorFinalReview({
     forbidden: editedSkill.forbidden
   });
   const validation = validateSkillMarkdown(markdown);
+  const hasDisplayName = displayName.trim().length > 0;
+  const canPublish = validation.valid && hasDisplayName;
 
   useEffect(() => {
     setDisplayName(draft.displayName);
@@ -8437,8 +8439,11 @@ function SkillCreatorFinalReview({
         <Button
           type="button"
           className="rounded-xl"
-          disabled={!validation.valid}
-          onClick={() => onPublish(editedSkill)}
+          disabled={!canPublish}
+          onClick={() => {
+            if (!canPublish) return;
+            onPublish({ ...editedSkill, displayName: displayName.trim() });
+          }}
         >
           <Sparkles data-icon="inline-start" />
           发布到广场
