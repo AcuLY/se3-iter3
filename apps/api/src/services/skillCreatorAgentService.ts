@@ -101,24 +101,14 @@ export class SkillCreatorAgentService {
     const messages = buildCreatorMessages(session);
     const raw = await this.llmClient(messages);
     const parsed = await parseCreatorTurnWithRepair(raw, messages, this.llmClient);
-    if (
-      parsed.done &&
-      (!isFinalTurnPatchReady(parsed) || !isSkillCreatorDraftReady(applySkillCreatorDraftPatch(session.draft, parsed.draftPatch)))
-    ) {
-      return {
-        assistantMessage: "这版还差完整的可发布字段，我需要再确认一次。",
-        question: "生成行程时，哪些安排一出现就算跑偏？",
-        mode: "multiple",
-        options: [
-          { id: "too-many-spots", label: "每天塞满太多景点" },
-          { id: "long-transfer", label: "连续跨区或长距离折返" },
-          { id: "hot-walking", label: "午后暴晒下长距离步行" }
-        ],
-        customPlaceholder: "也可以写其他不希望出现的安排",
-        progressPercent: Math.min(parsed.progressPercent, 80),
-        draftPatch: parsed.draftPatch,
-        done: false
-      };
+    if (isIncompleteFinalTurn(session, parsed)) {
+      return requestContinuationTurn({
+        session,
+        messages,
+        attemptedRawTurn: raw,
+        attemptedTurn: parsed,
+        llmClient: this.llmClient
+      });
     }
     return parsed;
   }
@@ -150,6 +140,56 @@ function isFinalTurnPatchReady(turn: SkillCreatorTurn): boolean {
       patch.rules?.some((rule) => rule.trim()) &&
       patch.forbidden?.some((item) => item.trim())
   );
+}
+
+function isIncompleteFinalTurn(session: SkillCreatorSession, turn: SkillCreatorTurn): boolean {
+  return (
+    turn.done &&
+    (!isFinalTurnPatchReady(turn) || !isSkillCreatorDraftReady(applySkillCreatorDraftPatch(session.draft, turn.draftPatch)))
+  );
+}
+
+function missingFinalTurnPatchFields(turn: SkillCreatorTurn): string[] {
+  const patch = turn.draftPatch;
+  const missing: string[] = [];
+  if (!patch.name?.trim()) missing.push("name");
+  if (!patch.displayName?.trim()) missing.push("displayName");
+  if (!patch.description?.trim()) missing.push("description");
+  if (!patch.body?.trim()) missing.push("body");
+  if (!patch.tags?.some((tag) => tag.trim())) missing.push("tags");
+  if (!patch.rules?.some((rule) => rule.trim())) missing.push("rules");
+  if (!patch.forbidden?.some((item) => item.trim())) missing.push("forbidden");
+  return missing;
+}
+
+async function requestContinuationTurn(input: {
+  session: SkillCreatorSession;
+  messages: DeepSeekMessage[];
+  attemptedRawTurn: string;
+  attemptedTurn: SkillCreatorTurn;
+  llmClient: LlmClient;
+}): Promise<SkillCreatorTurn> {
+  const draftAfterAttempt = applySkillCreatorDraftPatch(input.session.draft, input.attemptedTurn.draftPatch);
+  const continuationMessages: DeepSeekMessage[] = [
+    ...input.messages,
+    { role: "assistant", content: input.attemptedRawTurn },
+    {
+      role: "user",
+      content: JSON.stringify({
+        contractIssue: "你刚才返回 done: true，但最终草稿还没有达到可发布条件。",
+        missingFinalDraftPatchFields: missingFinalTurnPatchFields(input.attemptedTurn),
+        draftAfterAttempt,
+        requiredAction:
+          "请继续由你主导提出下一道 single 或 multiple 选择题，用用户能理解的旅行语境补齐缺口。只返回新的 JSON 对象；除非 draftPatch 同时包含 name、displayName、description、body、tags、rules、forbidden 且可发布，否则 done 必须是 false。"
+      })
+    }
+  ];
+  const raw = await input.llmClient(continuationMessages);
+  const turn = await parseCreatorTurnWithRepair(raw, continuationMessages, input.llmClient);
+  if (isIncompleteFinalTurn(input.session, turn)) {
+    throw new Error("Creator Agent returned an incomplete final draft");
+  }
+  return turn;
 }
 
 function parseCreatorTurn(raw: string): SkillCreatorTurn {

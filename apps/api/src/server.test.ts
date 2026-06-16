@@ -3018,22 +3018,45 @@ describe("travel workbench API", () => {
     expect(reply.body.session.draft.forbidden).toEqual(expect.arrayContaining(["为了打卡塞满每天行程"]));
   });
 
-  it("blocks done when the Agent returns an incomplete final draft", async () => {
+  it("asks the Agent for another question when done returns an incomplete final draft", async () => {
     vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => {
+      vi.fn(async (_url, init) => {
+        callCount += 1;
+        const content =
+          callCount === 1
+            ? {
+                assistantMessage: "可以结束。",
+                progressPercent: 100,
+                draftPatch: { rules: [] },
+                done: true
+              }
+            : {
+                assistantMessage: "还需要确认跑偏边界。",
+                question: "生成行程时，哪些安排一出现就算跑偏？",
+                mode: "multiple",
+                options: [
+                  { id: "packed-days", label: "每天塞满太多安排" },
+                  { id: "long-transfer", label: "连续跨区或长距离折返" },
+                  { id: "hot-walking", label: "午后暴晒下长距离步行" }
+                ],
+                customPlaceholder: "也可以写其他不希望出现的安排",
+                progressPercent: 72,
+                draftPatch: { rules: [], forbidden: ["每天塞满太多安排"] },
+                done: false
+              };
+        if (callCount === 2) {
+          const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+          expect(body.messages.at(-1).content).toContain("contractIssue");
+        }
         return new Response(
           JSON.stringify({
             choices: [
               {
                 message: {
-                  content: JSON.stringify({
-                    assistantMessage: "可以结束。",
-                    progressPercent: 100,
-                    draftPatch: { rules: [] },
-                    done: true
-                  })
+                  content: JSON.stringify(content)
                 }
               }
             ]
@@ -3050,9 +3073,10 @@ describe("travel workbench API", () => {
       .send({ sourceText: "只是喜欢慢慢逛。" })
       .expect(201);
 
+    expect(callCount).toBe(2);
     expect(result.body.turn.done).toBe(false);
     expect(result.body.turn.question).toBe("生成行程时，哪些安排一出现就算跑偏？");
-    expect(result.body.turn.progressPercent).toBeLessThan(100);
+    expect(result.body.turn.progressPercent).toBe(72);
   });
 
   it("repairs malformed Creator Agent JSON once before returning the turn", async () => {
