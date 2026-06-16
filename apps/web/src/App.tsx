@@ -795,20 +795,26 @@ export default function App() {
   }
 
   async function publishSkillDraft(changes: Partial<TravelSkill>) {
-    if (!creatorDraft) return;
+    const draft =
+      creatorDraft ??
+      (changes.id ? skills.find((skill) => skill.id === changes.id) : undefined) ??
+      (changes.id && changes.name && changes.createdAt && changes.updatedAt ? (changes as TravelSkill) : undefined);
+    if (!draft) return;
     const timestamp = new Date().toISOString();
+    const publishBody = skillContentChanges(changes);
+    delete publishBody.status;
     const publishedChanges = {
-      ...skillContentChanges(changes),
+      ...publishBody,
       status: "published" as const
     };
     const fallbackSkill = {
-      ...appendSkillVersion(creatorDraft, publishedChanges, { summary: "发布到广场", createdAt: timestamp }),
+      ...appendSkillVersion(draft, publishedChanges, { summary: "发布到广场", createdAt: timestamp }),
       updatedAt: timestamp
     };
     replaceSkill(fallbackSkill);
     const result = await apiPost<{ skill: TravelSkill }>(
-      `/skills/${creatorDraft.id}/publish`,
-      changes,
+      `/skills/${draft.id}/publish`,
+      publishBody,
       { skill: fallbackSkill }
     );
     replaceSkill(result.skill);
@@ -8277,12 +8283,16 @@ function SkillCreator({
     });
   }
 
+  const showHeader = !session || !turn || turn.done;
+
   return (
     <main className="mx-auto flex h-[calc(100dvh-32px)] max-w-5xl flex-col gap-4 overflow-hidden p-4 md:p-6">
-      <div className="shrink-0">
-        <h2 className="text-3xl font-black">创作 Skill</h2>
-        <p className="text-muted-foreground">把旅行经验交给创作助手，由它主持问题并生成可发布的旅行风格。</p>
-      </div>
+      {showHeader && (
+        <div className="shrink-0">
+          <h2 className="text-3xl font-black">创作 Skill</h2>
+          <p className="text-muted-foreground">把旅行经验交给创作助手，由它主持问题并生成可发布的旅行风格。</p>
+        </div>
+      )}
 
       {!session || !turn ? (
         <form className="grid min-h-0 flex-1 gap-4 rounded-xl border border-border bg-white p-4" onSubmit={handleStart}>
@@ -8328,9 +8338,6 @@ function SkillCreator({
             </div>
           </div>
           <div>
-            <p className="mb-2 text-xs font-black text-muted-foreground">
-              {turn.mode === "multiple" ? "多选，也可以补充自己的说法" : "单选，也可以补充自己的说法"}
-            </p>
             <h3 className="text-3xl font-black leading-tight">{turn.question}</h3>
           </div>
           <div className="grid gap-3">
@@ -8385,25 +8392,54 @@ function SkillCreatorFinalReview({
   onPublish: (changes: Partial<TravelSkill>) => void;
 }) {
   const draft = session.draft;
+  const [displayName, setDisplayName] = useState(draft.displayName);
+  const [tags, setTags] = useState(draft.tags.join(","));
+  const [description, setDescription] = useState(draft.description);
+  const [rules, setRules] = useState(draft.rules.join("\n"));
+  const [forbidden, setForbidden] = useState(draft.forbidden.join("\n"));
+  const [body, setBody] = useState(draft.body);
+  const editedSkill: TravelSkill = {
+    ...draft,
+    displayName,
+    description,
+    body,
+    tags: splitTagInput(tags),
+    rules: splitLines(rules),
+    forbidden: splitLines(forbidden)
+  };
   const markdown = buildSkillMarkdown({
     name: draft.name,
-    description: draft.description,
-    body: draft.body,
-    tags: draft.tags,
-    rules: draft.rules,
-    forbidden: draft.forbidden
+    description: editedSkill.description,
+    body: editedSkill.body,
+    tags: editedSkill.tags,
+    rules: editedSkill.rules,
+    forbidden: editedSkill.forbidden
   });
   const validation = validateSkillMarkdown(markdown);
+
+  useEffect(() => {
+    setDisplayName(draft.displayName);
+    setTags(draft.tags.join(","));
+    setDescription(draft.description);
+    setRules(draft.rules.join("\n"));
+    setForbidden(draft.forbidden.join("\n"));
+    setBody(draft.body);
+  }, [draft.id]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto rounded-xl border border-border bg-white p-5" aria-label="最终检查">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-black text-muted-foreground">最终检查</p>
-          <h3 className="mt-1 text-2xl font-black">{skillDisplayTitle(draft)}</h3>
-          <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-muted-foreground">{draft.description}</p>
+          <h3 className="mt-1 text-2xl font-black">{editedSkill.displayName}</h3>
+          <p className="mt-2 max-w-3xl text-sm font-semibold leading-6 text-muted-foreground">{editedSkill.description}</p>
         </div>
-        <Button type="button" className="rounded-xl" disabled={!validation.valid} onClick={() => onPublish(draft)}>
+        <Button
+          type="button"
+          className="rounded-xl"
+          disabled={!validation.valid}
+          onClick={() => onPublish(editedSkill)}
+        >
           <Sparkles data-icon="inline-start" />
           发布到广场
         </Button>
@@ -8413,27 +8449,27 @@ function SkillCreatorFinalReview({
         <div className="grid gap-3 rounded-xl bg-[#fbfbf9] p-4">
           <p className="text-xs font-black text-muted-foreground">标签</p>
           <div className="flex flex-wrap gap-2">
-            {draft.tags.map((tag) => (
+            {editedSkill.tags.map((tag) => (
               <Badge key={tag} className="bg-white text-foreground">
                 {tag}
               </Badge>
             ))}
           </div>
           <p className="text-xs font-black text-muted-foreground">摘要</p>
-          <p className="text-sm font-semibold leading-6 text-foreground">{draft.body}</p>
+          <p className="text-sm font-semibold leading-6 text-foreground">{editedSkill.body}</p>
         </div>
         <div className="grid gap-3 rounded-xl bg-[#fbfbf9] p-4">
           <p className="text-xs font-black text-muted-foreground">规则</p>
           <ul className="grid gap-2 text-sm font-semibold leading-6 text-foreground">
-            {draft.rules.map((rule) => (
+            {editedSkill.rules.map((rule) => (
               <li key={rule}>{rule}</li>
             ))}
           </ul>
-          {draft.forbidden.length > 0 && (
+          {editedSkill.forbidden.length > 0 && (
             <>
               <p className="text-xs font-black text-muted-foreground">避免</p>
               <ul className="grid gap-2 text-sm font-semibold leading-6 text-foreground">
-                {draft.forbidden.map((rule) => (
+                {editedSkill.forbidden.map((rule) => (
                   <li key={rule}>{rule}</li>
                 ))}
               </ul>
@@ -8449,6 +8485,52 @@ function SkillCreatorFinalReview({
         </Button>
         {advancedOpen && (
           <div className="grid gap-3">
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                Skill 名称
+                <Input value={displayName} onChange={(event) => setDisplayName(event.target.value)} aria-label="Skill 名称" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                Skill 标签
+                <Input value={tags} onChange={(event) => setTags(event.target.value)} aria-label="Skill 标签" />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground md:col-span-2">
+                Skill 说明
+                <Textarea
+                  className="min-h-24 bg-white"
+                  value={description}
+                  onChange={(event) => setDescription(event.target.value)}
+                  aria-label="Skill 说明"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                规划规则
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={rules}
+                  onChange={(event) => setRules(event.target.value)}
+                  aria-label="规划规则"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground">
+                不希望出现的安排
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={forbidden}
+                  onChange={(event) => setForbidden(event.target.value)}
+                  aria-label="不希望出现的安排"
+                />
+              </label>
+              <label className="grid gap-1 text-xs font-bold text-muted-foreground md:col-span-2">
+                Skill 正文
+                <Textarea
+                  className="min-h-32 bg-white text-sm font-semibold text-foreground"
+                  value={body}
+                  onChange={(event) => setBody(event.target.value)}
+                  aria-label="Skill 正文"
+                />
+              </label>
+            </div>
             <p className="text-xs font-bold text-muted-foreground">SKILL.md 预览包含 frontmatter 和正文。</p>
             {!validation.valid && <SkillValidationSummary title="发布检查" validation={validation} />}
             <pre className="max-h-80 overflow-auto rounded-xl bg-secondary p-4 text-xs leading-6">{markdown}</pre>

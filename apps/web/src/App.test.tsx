@@ -2811,6 +2811,10 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByRole("button", { name: "想慢慢逛小店" })).toBeInTheDocument();
     expect(screen.getByLabelText("补充答案")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交回答" })).toBeDisabled();
+    expect(screen.queryByRole("heading", { name: "创作 Skill" })).not.toBeInTheDocument();
+    expect(screen.queryByText("把旅行经验交给创作助手，由它主持问题并生成可发布的旅行风格。")).not.toBeInTheDocument();
+    expect(screen.queryByText("单选，也可以补充自己的说法")).not.toBeInTheDocument();
+    expect(screen.queryByText("多选，也可以补充自己的说法")).not.toBeInTheDocument();
     expect(screen.queryByText("问题 1")).not.toBeInTheDocument();
     expect(screen.queryByText("第 1 题")).not.toBeInTheDocument();
     expect(screen.queryByText("1/3")).not.toBeInTheDocument();
@@ -2877,6 +2881,7 @@ describe("Travel Skill Agent frontend", () => {
   });
 
   it("keeps final Skill markdown hidden until the final review is expanded", async () => {
+    let publishBody: Partial<TravelSkill> = {};
     const doneTurn = creatorTurn({
       question: undefined,
       mode: undefined,
@@ -2886,7 +2891,7 @@ describe("Travel Skill Agent frontend", () => {
     });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/skills/creator/start")) {
           const turn = creatorTurn();
@@ -2900,6 +2905,13 @@ describe("Travel Skill Agent frontend", () => {
             JSON.stringify({ session: creatorSession({ currentTurn: doneTurn, status: "ready" }), turn: doneTurn }),
             { status: 200, headers: { "Content-Type": "application/json" } }
           );
+        }
+        if (url.includes("/api/skills/skill-seaside-shop-style/publish")) {
+          publishBody = JSON.parse(String(init?.body ?? "{}")) as Partial<TravelSkill>;
+          return new Response(JSON.stringify({ skill: { ...creatorDraft(), ...publishBody, status: "published" } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
         }
         return new Response("", { status: 404 });
       })
@@ -2920,12 +2932,44 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByText(/name: seaside-shop-style/)).not.toBeInTheDocument();
     expect(screen.queryByText(/frontmatter/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/SKILL\.md/)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Skill 名称")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Skill 说明")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "展开最终 Skill 产物" }));
 
+    expect(screen.getByLabelText("Skill 名称")).toHaveValue("海边小店松弛风格");
+    expect(screen.getByLabelText("Skill 说明")).toHaveValue("适合看海、逛小店、保留傍晚松弛时间的旅行风格。");
+    expect(screen.getByLabelText("Skill 标签")).toHaveValue("海边,小店,松弛");
+    expect(screen.getByLabelText("规划规则")).toHaveValue("每天最多两个核心安排\n傍晚留给小店和日落");
+    expect(screen.getByLabelText("不希望出现的安排")).toHaveValue("避免连续跨区\n不要午后暴晒长距离步行");
+    await user.clear(screen.getByLabelText("Skill 名称"));
+    await user.type(screen.getByLabelText("Skill 名称"), "海边小店夜游风格");
+    await user.clear(screen.getByLabelText("Skill 标签"));
+    await user.type(screen.getByLabelText("Skill 标签"), "海边,夜游");
+    await user.clear(screen.getByLabelText("Skill 说明"));
+    await user.type(screen.getByLabelText("Skill 说明"), "适合看海和夜游小店。");
+    await user.clear(screen.getByLabelText("规划规则"));
+    await user.type(screen.getByLabelText("规划规则"), "每天保留夜游小店");
+    await user.clear(screen.getByLabelText("不希望出现的安排"));
+    await user.type(screen.getByLabelText("不希望出现的安排"), "避免午后暴晒长距离步行");
+    await user.clear(screen.getByLabelText("Skill 正文"));
+    await user.type(screen.getByLabelText("Skill 正文"), "把夜游小店和看海作为核心体验。");
     expect(screen.getByText(/name: seaside-shop-style/)).toBeInTheDocument();
     expect(screen.getByText(/SKILL\.md/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "发布到广场" })).not.toBeDisabled();
+
+    await user.click(screen.getByRole("button", { name: "发布到广场" }));
+
+    await waitFor(() => {
+      expect(publishBody).toMatchObject({
+        displayName: "海边小店夜游风格",
+        description: "适合看海和夜游小店。",
+        body: "把夜游小店和看海作为核心体验。",
+        tags: ["海边", "夜游"],
+        rules: ["每天保留夜游小店"],
+        forbidden: ["避免午后暴晒长距离步行"]
+      });
+    });
   });
 
   it("shows retryable Skill creator reply failures and preserves the pending answer", async () => {
