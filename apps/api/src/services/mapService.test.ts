@@ -63,7 +63,7 @@ describe("MapService", () => {
     });
   });
 
-  it("skips Amap POIs without coordinates and falls back when no usable result remains", async () => {
+  it("skips Amap POIs without coordinates and returns an empty result without local fallback", async () => {
     vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
     vi.stubGlobal(
       "fetch",
@@ -85,12 +85,7 @@ describe("MapService", () => {
     const service = new MapService();
     const items = await service.searchPoi("无坐标地点", "杭州");
 
-    expect(items[0]).toMatchObject({
-      id: "mock-无坐标地点",
-      source: "mock",
-      type: "风景名胜",
-      location: { lng: 120.1551, lat: 30.2741 }
-    });
+    expect(items).toEqual([]);
   });
 
   it("uses Amap route planning and normalizes seconds to minutes", async () => {
@@ -321,23 +316,16 @@ describe("MapService", () => {
     expect(route.steps).toHaveLength(2);
   });
 
-  it("uses traveler-facing Chinese copy for fallback route summaries", async () => {
+  it("throws when route planning is requested without an Amap web service key", async () => {
     const service = new MapService();
-    const route = await service.route("西湖", "湖滨银泰", "walking");
 
-    expect(route).toMatchObject({
-      mode: "walking",
-      source: "mock",
-      summary: "步行路线建议",
-      status: "estimated",
-      fallbackReason: "实时路线不可用时的参考值"
-    });
-    expect(route.steps?.[0]).toMatchObject({
-      instruction: "步行前往湖滨银泰",
-      mode: "walking",
-      distanceMeters: 1300,
-      durationMinutes: 18
-    });
+    await expect(service.route("西湖", "湖滨银泰", "walking")).rejects.toThrow("AMAP_WEB_SERVICE_KEY is required");
+  });
+
+  it("throws when POI search is requested without an Amap web service key", async () => {
+    const service = new MapService();
+
+    await expect(service.searchPoi("西湖", "杭州")).rejects.toThrow("AMAP_WEB_SERVICE_KEY is required");
   });
 
   it("uses Amap weather forecasts for the requested travel date", async () => {

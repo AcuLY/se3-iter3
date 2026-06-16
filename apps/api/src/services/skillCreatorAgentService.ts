@@ -13,11 +13,16 @@ import {
   type TravelItinerary
 } from "@journey/shared";
 import type { JourneyDatabase } from "../db.js";
+import {
+  readChatCompletionModelConfig,
+  requestChatCompletion,
+  type ChatCompletionMessage
+} from "./chatCompletionClient.js";
 import { SkillService } from "./skillService.js";
 import { SKILL_CREATOR_AGENT_SYSTEM_PROMPT } from "./skillCreatorAgentPrompt.js";
 
-type DeepSeekMessage = { role: "system" | "user" | "assistant"; content: string };
-type LlmClient = (messages: DeepSeekMessage[]) => Promise<string>;
+type SkillCreatorMessage = ChatCompletionMessage & { role: "system" | "user" | "assistant"; content: string };
+type LlmClient = (messages: SkillCreatorMessage[]) => Promise<string>;
 
 export type SkillCreatorStartInput = {
   sourceText: string;
@@ -44,7 +49,7 @@ export class SkillCreatorAgentService {
 
   constructor(
     private readonly db: JourneyDatabase,
-    private readonly llmClient: LlmClient = callDeepSeekCreatorAgent
+    private readonly llmClient: LlmClient = callSkillCreatorAgent
   ) {
     this.skills = new SkillService(db);
   }
@@ -114,7 +119,7 @@ export class SkillCreatorAgentService {
   }
 }
 
-function buildCreatorMessages(session: SkillCreatorSession): DeepSeekMessage[] {
+function buildCreatorMessages(session: SkillCreatorSession): SkillCreatorMessage[] {
   return [
     { role: "system", content: SKILL_CREATOR_AGENT_SYSTEM_PROMPT },
     {
@@ -164,13 +169,13 @@ function missingFinalTurnPatchFields(turn: SkillCreatorTurn): string[] {
 
 async function requestContinuationTurn(input: {
   session: SkillCreatorSession;
-  messages: DeepSeekMessage[];
+  messages: SkillCreatorMessage[];
   attemptedRawTurn: string;
   attemptedTurn: SkillCreatorTurn;
   llmClient: LlmClient;
 }): Promise<SkillCreatorTurn> {
   const draftAfterAttempt = applySkillCreatorDraftPatch(input.session.draft, input.attemptedTurn.draftPatch);
-  const continuationMessages: DeepSeekMessage[] = [
+  const continuationMessages: SkillCreatorMessage[] = [
     ...input.messages,
     { role: "assistant", content: input.attemptedRawTurn },
     {
@@ -194,12 +199,56 @@ async function requestContinuationTurn(input: {
 
 function parseCreatorTurn(raw: string): SkillCreatorTurn {
   const cleaned = raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/i, "").trim();
-  return SkillCreatorTurnSchema.parse(JSON.parse(cleaned));
+  return SkillCreatorTurnSchema.parse(normalizeCreatorTurnJson(JSON.parse(cleaned)));
+}
+
+function normalizeCreatorTurnJson(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.options)) return record;
+  return {
+    ...record,
+    options: record.options.map(normalizeCreatorOption)
+  };
+}
+
+function normalizeCreatorOption(option: unknown, index: number): unknown {
+  if (typeof option === "string") {
+    const label = option.trim();
+    return label ? { id: optionIdFromLabel(label, index), label } : option;
+  }
+  if (!option || typeof option !== "object" || Array.isArray(option)) return option;
+  const record = option as Record<string, unknown>;
+  const label = firstNonEmptyString(record.label, record.text, record.title, record.name, record.content, record.value, record.id);
+  const id = firstNonEmptyString(record.id, record.key, record.value) ?? (label ? optionIdFromLabel(label, index) : undefined);
+  return {
+    ...record,
+    ...(id ? { id } : {}),
+    ...(label ? { label } : {})
+  };
+}
+
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed) return trimmed;
+  }
+  return undefined;
+}
+
+function optionIdFromLabel(label: string, index: number): string {
+  const ascii = label
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return ascii || `option-${index + 1}`;
 }
 
 async function parseCreatorTurnWithRepair(
   raw: string,
-  messages: DeepSeekMessage[],
+  messages: SkillCreatorMessage[],
   llmClient: LlmClient
 ): Promise<SkillCreatorTurn> {
   try {
@@ -210,31 +259,23 @@ async function parseCreatorTurnWithRepair(
       { role: "assistant", content: raw },
       {
         role: "user",
-        content: "上一条回复不是符合契约的 JSON。只返回一个修复后的 JSON 对象，不要添加解释。"
+        content:
+          '上一条回复不是符合契约的 JSON。只返回一个修复后的 JSON 对象，不要添加解释。特别注意 options 必须是 [{"id":"lowercase-kebab-case","label":"用户可读选项"}]，不要用 text、title、name、value 或字符串数组代替 label。'
       }
     ]);
     return parseCreatorTurn(repaired);
   }
 }
 
-async function callDeepSeekCreatorAgent(messages: DeepSeekMessage[]): Promise<string> {
-  if (!process.env.DEEPSEEK_API_KEY) {
-    throw new Error("Creator Agent requires DEEPSEEK_API_KEY");
+async function callSkillCreatorAgent(messages: SkillCreatorMessage[]): Promise<string> {
+  const modelConfig = readChatCompletionModelConfig();
+  if (!modelConfig) {
+    throw new Error("缺少模型配置，请设置 AGENT_MODEL_API_KEY、OPENAI_API_KEY 或 DEEPSEEK_API_KEY。");
   }
-  const response = await fetch(`${process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: process.env.DEEPSEEK_MODEL ?? "deepseek-chat",
-      messages,
-      temperature: 0.3
-    })
+  const data = await requestChatCompletion(modelConfig, {
+    messages,
+    temperature: 0.3
   });
-  if (!response.ok) throw new Error(`Creator Agent request failed: ${response.status}`);
-  const data = (await response.json()) as { choices?: Array<{ message?: { content?: string } }> };
   const content = data.choices?.[0]?.message?.content?.trim();
   if (!content) throw new Error("Creator Agent returned empty content");
   return content;

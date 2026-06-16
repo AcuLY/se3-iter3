@@ -6,22 +6,24 @@ import type {
   AgentSession,
   AgentTraceEvent,
   EvaluationCase,
+  SavedMemory,
   SkillCreatorSession,
   TravelItinerary,
   TravelSkill
 } from "@journey/shared";
 
-type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases" | "skill_creator_sessions";
+type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases" | "skill_creator_sessions" | "memories";
 
 export class JourneyDatabase {
   private readonly db: DatabaseSync;
 
-  constructor(filename: string) {
+  constructor(filename: string, options: { seed?: boolean } = {}) {
     if (filename !== ":memory:") {
       mkdirSync(dirname(resolve(filename)), { recursive: true });
     }
     this.db = new DatabaseSync(filename);
     this.initialize();
+    if (options.seed) this.seedIfEmpty();
   }
 
   listItineraries(): TravelItinerary[] {
@@ -84,6 +86,23 @@ export class JourneyDatabase {
     return session;
   }
 
+  listMemories(): SavedMemory[] {
+    return this.listJson<SavedMemory>("memories");
+  }
+
+  getMemory(id: string): SavedMemory | undefined {
+    return this.getJson<SavedMemory>("memories", id);
+  }
+
+  saveMemory(memory: SavedMemory): SavedMemory {
+    this.saveJson("memories", memory.id, memory);
+    return memory;
+  }
+
+  deleteMemory(id: string): boolean {
+    return this.deleteJson("memories", id) > 0;
+  }
+
   deleteSessionsForItinerary(itineraryId: string): number {
     const sessions = this.listSessions().filter((session) => session.itineraryId === itineraryId);
     const sessionIds = new Set(sessions.map((session) => session.id));
@@ -144,11 +163,15 @@ export class JourneyDatabase {
         json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS memories (
+        id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
-    this.seedIfEmpty();
   }
 
-  private seedIfEmpty(): void {
+  seedIfEmpty(): void {
     if (this.count("itineraries") === 0) {
       this.saveItinerary(createSeedItinerary());
     }
@@ -194,7 +217,7 @@ export class JourneyDatabase {
 }
 
 export function createInMemoryDatabase(): JourneyDatabase {
-  return new JourneyDatabase(":memory:");
+  return new JourneyDatabase(":memory:", { seed: true });
 }
 
 export function createFileDatabase(filename = process.env.DATABASE_PATH ?? "./data/journey.sqlite"): JourneyDatabase {

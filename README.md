@@ -10,8 +10,8 @@
 - Node.js + Express
 - SQLite via `node:sqlite`
 - Zod
-- DeepSeek Chat Completions 工具调用
-- 高德 Web Service + JS API，缺少 Key 时使用本地 fallback
+- OpenAI-compatible Chat Completions 工具调用（可用 `AGENT_MODEL_*`、`OPENAI_*` 或兼容的 `DEEPSEEK_*`）
+- 高德 Web Service + JS API
 
 ## 本地运行
 
@@ -62,4 +62,4 @@ npm run build
 
 ## 外部服务说明
 
-配置 `DEEPSEEK_API_KEY`、`AMAP_WEB_SERVICE_KEY`、`VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_SECURITY_JS_CODE` 后，应用会调用真实 DeepSeek 和高德服务。当前已验证高德 POI、天气，以及步行、驾车、骑行、公交/地铁路线规划；缺少 Key 或外部服务不可用时仍会降级到本地确定性 fallback，保证本地运行和答辩演示不中断。
+配置 `AGENT_MODEL_API_KEY`/`OPENAI_API_KEY`/兼容的 `DEEPSEEK_API_KEY`、`AMAP_WEB_SERVICE_KEY`、`VITE_AMAP_JS_API_KEY` 和 `VITE_AMAP_SECURITY_JS_CODE` 后，应用会调用真实模型与高德服务。当前不会在缺少 Key 或外部服务失败时自动降级到本地 mock/fallback；错误会直接暴露到前端，演示数据需要通过 UI、API 或直接写 DB 手动创建。

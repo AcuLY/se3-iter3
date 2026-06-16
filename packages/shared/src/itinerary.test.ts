@@ -27,8 +27,7 @@ describe("itinerary editing helpers", () => {
       destination: "杭州",
       startDate: "2026-07-01",
       dayCount: 3,
-      companions: ["朋友"],
-      preferences: ["慢节奏", "咖啡"]
+      companions: ["朋友"]
     });
 
     expect(draft.days).toHaveLength(3);
@@ -52,6 +51,35 @@ describe("itinerary editing helpers", () => {
       "2026-07-04"
     ]);
     expect(draft.endDate).toBe("2026-07-04");
+  });
+
+  it("creates the first planned place from the first destination without replacing the departure point", () => {
+    const draft = createDraftItinerary({
+      title: "跨城周末",
+      destination: "上海虹桥站",
+      firstDestination: "西湖",
+      firstDestinationPlace: {
+        name: "西湖",
+        address: "龙井路",
+        city: "杭州",
+        district: "西湖区",
+        type: "风景名胜",
+        coordinates: { lng: 120.141, lat: 30.259 }
+      },
+      startDate: "2026-07-01",
+      endDate: "2026-07-02"
+    });
+
+    expect(draft.destination).toBe("上海虹桥站");
+    expect(draft.days[0]?.activities).toHaveLength(1);
+    expect(draft.days[0]?.activities[0]).toMatchObject({
+      title: "西湖",
+      placeName: "西湖",
+      place: {
+        name: "西湖",
+        coordinates: { lng: 120.141, lat: 30.259 }
+      }
+    });
   });
 
   it("adds a day before the current trip without moving existing plans", () => {

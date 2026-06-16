@@ -145,6 +145,8 @@ export type CreateItineraryInput = {
   title: string;
   destination: string;
   destinationPlace?: Place;
+  firstDestination?: string;
+  firstDestinationPlace?: Place;
   startDate: string;
   endDate?: string;
   dayCount?: number;
@@ -269,6 +271,35 @@ export type AgentTraceEvent = {
   createdAt: string;
 };
 
+export type AgentRunEventType =
+  | "thought_summary"
+  | "assistant_message"
+  | "tool_call"
+  | "tool_result"
+  | "state_patch"
+  | "handoff"
+  | "error"
+  | "final_signal";
+
+export type AgentRunEventStatus = "running" | "completed" | "failed";
+
+export type AgentRunEvent = {
+  id: string;
+  sessionId: string;
+  turnIndex: number;
+  sequence: number;
+  type: AgentRunEventType;
+  status: AgentRunEventStatus;
+  title: string;
+  detail: string;
+  agent?: AgentName;
+  technical?: {
+    input?: unknown;
+    output?: unknown;
+  };
+  createdAt: string;
+};
+
 export type ChatMessage = {
   id: string;
   role: "user" | "assistant" | "system";
@@ -284,9 +315,19 @@ export type AgentSession = {
   traces: AgentTraceEvent[];
   contextSummary?: string;
   userPreferenceSummary?: string;
+  memorySnapshotText?: string;
   createdAt: string;
   updatedAt: string;
 };
+
+export const SavedMemorySchema = z.object({
+  id: z.string(),
+  content: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+
+export type SavedMemory = z.infer<typeof SavedMemorySchema>;
 
 export type MapRouteMode = "walking" | "transit" | "driving" | "cycling";
 

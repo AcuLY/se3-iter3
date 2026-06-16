@@ -7,8 +7,10 @@ import type { JourneyDatabase } from "./db.js";
 import { createFileDatabase } from "./db.js";
 import { AgentRunAbortedError, AgentService } from "./services/agentService.js";
 import { EvaluationService } from "./services/evaluationService.js";
+import { HistoryService } from "./services/historyService.js";
 import { ItineraryService } from "./services/itineraryService.js";
 import { MapService } from "./services/mapService.js";
+import { MemoryService } from "./services/memoryService.js";
 import { SkillCreatorAgentService } from "./services/skillCreatorAgentService.js";
 import { SkillService } from "./services/skillService.js";
 import {
@@ -33,6 +35,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
   const agents = new AgentService(db);
   const maps = new MapService();
   const evaluation = new EvaluationService(db);
+  const memories = new MemoryService(db);
+  const history = new HistoryService(db);
 
   const app = express();
   app.use(cors());
@@ -132,7 +136,6 @@ export function createApp(options: CreateAppOptions = {}): Express {
       costCny,
       provider: manualOverride ? "manual" : route.source,
       routeStatus: manualOverride ? "manual" : route.status,
-      failureReason: route.fallbackReason,
       summary,
       note,
       manualOverride,
@@ -176,7 +179,6 @@ export function createApp(options: CreateAppOptions = {}): Express {
           durationMinutes: route.durationMinutes,
           provider: route.source,
           routeStatus: route.status,
-          failureReason: route.fallbackReason,
           summary: route.summary,
           polyline: route.polyline ?? [],
           steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(pair.toActivity))
@@ -198,6 +200,27 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   app.get("/api/itineraries/:id/export", (req, res) => {
     res.type("text/markdown").send(itineraries.exportMarkdown(req.params.id));
+  });
+
+  app.get("/api/memories", (req, res) => {
+    res.json({
+      items: memories.list({
+        query: asString(req.query.query),
+        limit: readOptionalPositiveInt(req.query.limit)
+      })
+    });
+  });
+
+  app.post("/api/memories", (req, res) => {
+    res.status(201).json({ memory: memories.create(asString(req.body?.content) ?? "") });
+  });
+
+  app.patch("/api/memories/:id", (req, res) => {
+    res.json({ memory: memories.update(req.params.id, asString(req.body?.content) ?? "") });
+  });
+
+  app.delete("/api/memories/:id", (req, res) => {
+    res.json({ deleted: memories.delete(req.params.id) });
   });
 
   app.post("/api/itineraries/:id/skills/:skillId", (req, res) => {
@@ -344,6 +367,29 @@ export function createApp(options: CreateAppOptions = {}): Express {
     res.json({ items });
   });
 
+  app.get("/api/agent/history/itineraries", (req, res) => {
+    res.json({
+      items: history.listItineraries({
+        query: asString(req.query.query),
+        limit: readOptionalPositiveInt(req.query.limit)
+      })
+    });
+  });
+
+  app.get("/api/agent/history/conversations/search", (req, res) => {
+    res.json({
+      items: history.searchConversations({
+        keyword: asString(req.query.keyword) ?? "",
+        itineraryQuery: asString(req.query.itineraryQuery),
+        limit: readOptionalPositiveInt(req.query.limit)
+      })
+    });
+  });
+
+  app.get("/api/agent/history/conversations/:itineraryId", (req, res) => {
+    res.json(history.loadConversation(req.params.itineraryId));
+  });
+
   app.delete("/api/agent/sessions", (req, res) => {
     const itineraryId = asString(req.query.itineraryId);
     if (!itineraryId) throw new Error("itineraryId is required");
@@ -376,7 +422,12 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   app.use((error: unknown, _req: Request, res: Response, _next: () => void) => {
     const message = error instanceof Error ? error.message : "Unknown server error";
-    const status = message.includes("not found") || message.includes("not found") ? 404 : 400;
+    const status =
+      typeof error === "object" && error && "status" in error && typeof (error as { status?: unknown }).status === "number"
+        ? Number((error as { status?: unknown }).status)
+        : message.includes("not found") || message.includes("not found")
+          ? 404
+          : 400;
     const validation =
       typeof error === "object" && error && "validation" in error
         ? (error as { validation?: unknown }).validation
@@ -396,6 +447,12 @@ function asString(value: unknown): string | undefined {
 function readOptionalNonNegativeNumber(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return undefined;
   return value;
+}
+
+function readOptionalPositiveInt(value: unknown): number | undefined {
+  const raw = typeof value === "string" ? Number(value) : typeof value === "number" ? value : undefined;
+  if (raw === undefined || !Number.isInteger(raw) || raw <= 0) return undefined;
+  return raw;
 }
 
 function splitList(value: unknown): string[] {

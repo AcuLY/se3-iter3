@@ -238,13 +238,6 @@ export function recommendSkills(
         }
       }
 
-      for (const companion of context.companions ?? []) {
-        if (haystack.includes(companion.toLowerCase())) {
-          score += 2;
-          reasons.push(`匹配同行人：${companion}`);
-        }
-      }
-
       if (context.currentText) {
         const currentTokens = tokenize(context.currentText);
         const matched = currentTokens.some((token) => token.length > 1 && haystack.includes(token.toLowerCase()));
@@ -281,7 +274,6 @@ export function summarizeItineraryAsSkill(itinerary: TravelItinerary, conversati
   const tags = extractTags(
     [
       itinerary.destination,
-      ...itinerary.preferences,
       ...itinerary.days.flatMap((day) => day.activities.flatMap((activity) => activity.tags)),
       conversationSummary
     ].join(" ")
@@ -307,7 +299,7 @@ export function summarizeItineraryAsSkill(itinerary: TravelItinerary, conversati
       "",
       "## 规划规则",
       "- 保留用户明确喜欢的活动类型和节奏。",
-      "- 新行程需要结合目的地和同行人重新适配，而不是机械复制地点。"
+      "- 新行程需要结合目的地重新适配，而不是机械复制地点。"
     ].join("\n"),
     tags,
     rules: ["保留用户明确喜欢的活动类型和节奏", "结合目的地重新适配"],

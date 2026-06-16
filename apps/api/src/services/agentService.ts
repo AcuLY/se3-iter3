@@ -4,22 +4,35 @@ import {
   detectTransportTimingConflict,
   nowIso,
   type AgentName,
+  type AgentRunEvent,
   type AgentSession,
   type AgentTraceEvent,
   type Activity,
   type ChatMessage,
+  type ItineraryDay,
   type ItineraryPatch,
   type ItineraryPatchOperation,
   type MapRouteMode,
   type Place,
   type RouteSummary,
   type RouteStep,
+  type SavedMemory,
   type TravelSkill,
   type TravelItinerary
 } from "@journey/shared";
 import type { JourneyDatabase } from "../db.js";
+import {
+  readChatCompletionModelConfig,
+  readModelReasoning,
+  requestChatCompletion,
+  type ChatCompletionMessage,
+  type ChatCompletionModelConfig,
+  type ChatCompletionToolCall
+} from "./chatCompletionClient.js";
+import { HistoryService } from "./historyService.js";
 import { ItineraryService } from "./itineraryService.js";
 import { MapService, type PoiResult } from "./mapService.js";
+import { MemoryService } from "./memoryService.js";
 import { SkillService } from "./skillService.js";
 
 export type AgentRunInput = {
@@ -29,12 +42,24 @@ export type AgentRunInput = {
   signal?: AbortSignal;
 };
 
+export type AgentRunOptions = {
+  onEvent?: (event: AgentRunEvent) => void;
+};
+
 export type AgentRunResult = {
   itinerary: TravelItinerary;
   message: ChatMessage;
   diff: string[];
   traces: AgentTraceEvent[];
+  events: AgentRunEvent[];
   session: AgentSession;
+};
+
+type AgentRunContext = {
+  sessionId: string;
+  events: AgentRunEvent[];
+  sequence: number;
+  onEvent?: (event: AgentRunEvent) => void;
 };
 
 export class AgentRunAbortedError extends Error {
@@ -44,288 +69,283 @@ export class AgentRunAbortedError extends Error {
   }
 }
 
+const NATIONAL_POI_SEARCH_CITY = "全国";
+
 export class AgentService {
   private readonly itineraries: ItineraryService;
   private readonly skills: SkillService;
   private readonly maps = new MapService();
+  private readonly memories: MemoryService;
+  private readonly history: HistoryService;
 
   constructor(private readonly db: JourneyDatabase) {
     this.itineraries = new ItineraryService(db);
     this.skills = new SkillService(db);
+    this.memories = new MemoryService(db);
+    this.history = new HistoryService(db);
   }
 
-  async run(input: AgentRunInput): Promise<AgentRunResult> {
+  async run(input: AgentRunInput, options: AgentRunOptions = {}): Promise<AgentRunResult> {
     throwIfAborted(input.signal);
-    if (process.env.DEEPSEEK_API_KEY) {
-      try {
-        return await this.runDeepSeek(input);
-      } catch (error) {
-        const fallback = await this.runDeterministic(input);
-        fallback.traces.unshift(
-          this.trace(fallback.session.id, "MainAgent", "error", "模型调用失败，已降级", error instanceof Error ? error.message : "Unknown DeepSeek error")
-        );
-        return fallback;
-      }
+    const chatCompletionConfig = readChatCompletionModelConfig();
+    if (!chatCompletionConfig) {
+      throw new Error("缺少模型配置，请设置 AGENT_MODEL_API_KEY、OPENAI_API_KEY 或 DEEPSEEK_API_KEY。");
     }
-    return this.runDeterministic(input);
+    try {
+      return await this.runChatCompletions(input, chatCompletionConfig, options);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unknown model error";
+      throw new Error(`模型调用失败，请检查模型服务配置后重试。${detail ? ` ${detail}` : ""}`);
+    }
   }
 
-  private async runDeepSeek(input: AgentRunInput): Promise<AgentRunResult> {
+  private async runChatCompletions(
+    input: AgentRunInput,
+    modelConfig: ChatCompletionModelConfig,
+    options: AgentRunOptions = {}
+  ): Promise<AgentRunResult> {
     throwIfAborted(input.signal);
     const itinerary = this.itineraries.get(input.itineraryId);
     const importedSkillIds = unique([...(itinerary.importedSkillIds ?? []), ...(input.importedSkillIds ?? [])]);
     const importedSkills = importedSkillIds.map((id) => this.skills.get(id)).filter(Boolean);
-    const previousSessions = this.db
-      .listSessions()
-      .filter((session) => session.itineraryId === itinerary.id)
-      .slice(0, 5);
-    const preferenceSummary = inferPreferenceSummary(
-      itinerary.preferences,
-      importedSkills.map((skill) => skill.displayName),
-      previousSessions,
-      input.message
-    );
+    const memorySnapshotText = this.memories.buildSnapshotText();
     const sessionId = createId("session");
+    const context = this.createRunContext(sessionId, options);
     const traces: AgentTraceEvent[] = [
       this.trace(sessionId, "MainAgent", "message", "读取行程上下文", `${itinerary.title} / ${itinerary.days.length} 天`),
-      this.trace(
-        sessionId,
-        "MainAgent",
-        "message",
-        "读取历史偏好",
-        previousSessions.length ? preferenceSummary : "还没有历史会话，使用当前行程偏好。"
-      ),
+      this.trace(sessionId, "MainAgent", "message", "读取已保存记忆", memorySnapshotText),
       this.trace(sessionId, "StyleAgent", "tool_call", "读取已导入 Skill", importedSkills.map((skill) => skill.displayName).join("、") || "未导入 Skill"),
       this.trace(sessionId, "PlannerAgent", "handoff", "准备调用规划工具", "根据模型 tool_calls 操作结构化行程")
     ];
-
-    const response = await fetch(`${process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com"}/chat/completions`, {
-      method: "POST",
-      signal: input.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`
+    const messages: ChatCompletionMessage[] = [
+      {
+        role: "system",
+        content: [
+          "你是旅行规划主 Agent。你必须通过工具调用修改结构化行程，不要只输出文本。",
+          "你可以读取导入的旅行风格 Skill、全局已保存记忆和当前行程。",
+          "系统会直接注入一段全局记忆快照。除非你需要精确编辑某条记忆，否则不要为了感知手动编辑而先调用记忆列表工具。",
+          "当用户表达稳定、可长期复用的偏好、禁忌或回答风格时，你可以主动维护 saved memories。",
+          "只有当用户明显提到过去、上次、之前、历史里的某个行程或对话时，才调用历史对话工具。",
+          "当用户只是询问地点是否存在、路线如何、天气怎样，而没有要求修改行程时，优先使用只读查询工具，不要为了查询创建临时活动或写入画布。",
+          "普通用户不需要看到内部 Agent 名称；可以输出简短行动说明，但不要展示内部推理链路。",
+          "回复正文只做简短总结，不要列出本轮 diff；系统会在对话末尾追加结构化改动清单。"
+        ].join("\n")
       },
-      body: JSON.stringify({
-        model: process.env.DEEPSEEK_MODEL ?? "deepseek-chat",
-        messages: [
-          {
-            role: "system",
-            content: [
-              "你是旅行规划主 Agent。你必须通过工具调用修改结构化行程，不要只输出文本。",
-              "你可以读取导入的旅行风格 Skill、历史会话摘要和当前行程。",
-              "偏好维护要求：如果用户在对话中表达了可复用的稳定偏好、禁忌或自定义偏好类型，必须调用 update_itinerary_details，把 preferences 更新为“当前已有偏好 + 新偏好”的去重结果；不要覆盖用户已有偏好，也不要把一次性的具体活动当作长期偏好。",
-              "当用户表达负向偏好时，用“避开/避免 + 对象”的短语写入 preferences，例如“避开排队”“避免太赶”。",
-              "普通用户不需要看到内部 Agent 名称，但 trace 会用于开发后台。",
-              "回复正文只做简短总结，不要列出本轮 diff；系统会在对话末尾追加结构化改动清单。"
-            ].join("\n")
-          },
-          {
-            role: "user",
-            content: JSON.stringify({
-              request: input.message,
-              itinerary,
-              importedSkills: importedSkills.map((skill) => ({
-                id: skill.id,
-                name: skill.displayName,
-                description: skill.description,
-                rules: skill.rules,
-                forbidden: skill.forbidden,
-                body: skill.body
-              })),
-              previousMessages: previousSessions.flatMap((session) => session.messages).slice(-12),
-              previousSessionSummaries: previousSessions.map((session) => session.contextSummary).filter(Boolean),
-              currentPreferences: itinerary.preferences,
-              userPreferenceSummary: preferenceSummary
-            })
-          }
-        ],
-        tools: deepSeekTools(),
-        tool_choice: "auto"
-      })
-    });
-    throwIfAborted(input.signal);
-    if (!response.ok) throw new Error(`DeepSeek request failed: ${response.status}`);
-    const data = (await response.json()) as DeepSeekChatResponse;
-    throwIfAborted(input.signal);
-    const message = data.choices?.[0]?.message;
-    const toolCalls = message?.tool_calls ?? [];
+      {
+        role: "user",
+        content: JSON.stringify({
+          request: input.message,
+          itinerary,
+          importedSkills: importedSkills.map((skill) => ({
+            id: skill.id,
+            name: skill.displayName,
+            description: skill.description,
+            rules: skill.rules,
+            forbidden: skill.forbidden,
+            body: skill.body
+          })),
+          memorySnapshotText
+        })
+      }
+    ];
+    const state: ChatCompletionExecutionState = {
+      itinerary,
+      importedSkillIds,
+      traces,
+      sessionId,
+      diff: [],
+      addedStructuredActivity: false,
+      usedTransportTool: false
+    };
+    const seenToolCallIds = new Set<string>();
+    let assistantContent = "";
+    let stoppedByMaxTurns = false;
+    let finalSignalEmitted = false;
+    const maxTurns = readAgentMaxTurns();
 
-    const patchOperations: ItineraryPatchOperation[] = [];
-    const transportRequests: TransportToolRequest[] = [];
-    const transportComparisonRequests: TransportComparisonToolRequest[] = [];
-    const transportRemovalRequests: TransportRemovalToolRequest[] = [];
-    const timingAdjustmentRequests: TimingAdjustmentToolRequest[] = [];
-    const placeActivityRequests: PlaceActivityToolRequest[] = [];
-    const placeUpdateRequests: PlaceUpdateToolRequest[] = [];
-    const itineraryDetailChanges: ItineraryDetailChanges[] = [];
-    let completeTransportMode: MapRouteMode | undefined;
-    const placeDiff: string[] = [];
-    const transportDiff: string[] = [];
-    let currentImportedSkillIds = importedSkillIds;
-    for (const toolCall of toolCalls) {
-      const parsed = parseToolArguments(toolCall.function.arguments);
-      traces.push(
-        this.trace(sessionId, toolAgent(toolCall.function.name), "tool_call", toolCall.function.name, JSON.stringify(parsed))
+    for (let turnIndex = 1; turnIndex <= maxTurns; turnIndex += 1) {
+      throwIfAborted(input.signal);
+      const data = await requestChatCompletion(
+        modelConfig,
+        {
+          messages,
+          tools: chatCompletionTools(),
+          tool_choice: "auto"
+        },
+        input.signal
       );
-      if (toolCall.function.name === "add_activity") {
-        patchOperations.push({
-          type: "addActivity",
-          dayId: String(parsed.dayId),
-          activity: {
-            type: parseActivityType(parsed.type),
-            title: String(parsed.title),
-            placeName: asOptionalString(parsed.placeName),
-            startTime: asOptionalString(parsed.startTime),
-            endTime: asOptionalString(parsed.endTime),
-            description: asOptionalString(parsed.description),
-            budgetCny: asOptionalNumber(parsed.budgetCny),
-            transportNote: asOptionalString(parsed.transportNote),
-            tags: asStringList(parsed.tags)
+      throwIfAborted(input.signal);
+      const message = data.choices?.[0]?.message;
+      const toolCalls = message?.tool_calls ?? [];
+      const reasoning = readModelReasoning(message);
+      if (reasoning) {
+        this.emitRunEvent(context, turnIndex, "thought_summary", "completed", "模型思考", reasoning, "MainAgent");
+      }
+      if (message?.content?.trim()) {
+        assistantContent = message.content.trim();
+        this.emitRunEvent(context, turnIndex, "assistant_message", "completed", "模型对外输出", assistantContent, "MainAgent");
+      }
+      if (reasoning || message?.content?.trim()) {
+        await this.pauseAfterEventFlush(context, input.signal);
+      }
+      if (toolCalls.length === 0) {
+        this.emitRunEvent(
+          context,
+          turnIndex,
+          "final_signal",
+          "completed",
+          "模型完成本轮任务",
+          assistantContent ? "已生成最终回复，未继续调用工具。" : "模型未继续调用工具，准备结束本轮任务。",
+          "CriticAgent"
+        );
+        finalSignalEmitted = true;
+        await this.pauseAfterEventFlush(context, input.signal);
+        break;
+      }
+      messages.push({
+        role: "assistant",
+        content: message?.content ?? "",
+        tool_calls: toolCalls
+      });
+      let repeatedToolCall = false;
+      for (const toolCall of toolCalls) {
+        if (seenToolCallIds.has(toolCall.id)) {
+          repeatedToolCall = true;
+          const detail = `模型重复调用工具 ${toolCall.id}，已停止循环以避免重复修改。`;
+          state.traces.push(this.trace(sessionId, toolAgent(toolCall.function.name), "error", "重复工具调用", detail));
+          this.emitRunEvent(context, turnIndex, "error", "failed", "重复工具调用", detail, toolAgent(toolCall.function.name));
+          this.emitRunEvent(context, turnIndex, "final_signal", "completed", "工具循环已停止", detail, "CriticAgent");
+          finalSignalEmitted = true;
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCall.id,
+            content: JSON.stringify({ status: "failed", summary: detail })
+          });
+          break;
+        }
+        seenToolCallIds.add(toolCall.id);
+        const parsed = parseToolArguments(toolCall.function.arguments);
+        const agent = toolAgent(toolCall.function.name);
+        state.traces.push(this.trace(sessionId, agent, "tool_call", toolCall.function.name, JSON.stringify(parsed)));
+        this.emitRunEvent(context, turnIndex, "tool_call", "running", toolCall.function.name, summarizeToolInput(toolCall.function.name, parsed), agent, {
+          input: compactTechnicalValue(parsed)
+        });
+        const execution = await this.executeChatCompletionToolCall(state, toolCall.function.name, parsed, input.signal);
+        this.emitRunEvent(
+          context,
+          turnIndex,
+          execution.status === "failed" ? "error" : "tool_result",
+          execution.status,
+          execution.title,
+          execution.summary,
+          agent,
+          {
+            input: compactTechnicalValue(parsed),
+            output: compactTechnicalValue(execution.output)
           }
+        );
+        messages.push({
+          role: "tool",
+          tool_call_id: toolCall.id,
+          content: JSON.stringify({
+            status: execution.status,
+            summary: execution.summary,
+            diff: execution.diff,
+            itinerary: summarizeItineraryForToolObservation(state.itinerary)
+          })
         });
       }
-      if (toolCall.function.name === "add_place_activity") {
-        placeActivityRequests.push({
-          dayId: String(parsed.dayId),
-          query: String(parsed.query ?? parsed.poiName ?? parsed.title ?? ""),
-          poiName: asOptionalString(parsed.poiName),
-          type: parseActivityType(parsed.type),
-          title: String(parsed.title ?? parsed.poiName ?? parsed.query ?? "新的地点"),
-          startTime: asOptionalString(parsed.startTime),
-          endTime: asOptionalString(parsed.endTime),
-          description: asOptionalString(parsed.description),
-          budgetCny: asOptionalNumber(parsed.budgetCny),
-          tags: asStringList(parsed.tags)
-        });
-      }
-      if (toolCall.function.name === "update_activity_place") {
-        placeUpdateRequests.push({
-          activityId: String(parsed.activityId),
-          query: String(parsed.query ?? parsed.poiName ?? parsed.title ?? ""),
-          poiName: asOptionalString(parsed.poiName),
-          type: parsed.type ? parseActivityType(parsed.type) : undefined,
-          title: asOptionalString(parsed.title)
-        });
-      }
-      if (toolCall.function.name === "update_activity") {
-        patchOperations.push({
-          type: "updateActivity",
-          activityId: String(parsed.activityId),
-          changes: parsed.changes as Partial<Activity>
-        });
-      }
-      if (toolCall.function.name === "remove_activity") {
-        patchOperations.push({ type: "removeActivity", activityId: String(parsed.activityId) });
-      }
-      if (toolCall.function.name === "move_activity") {
-        patchOperations.push({
-          type: "moveActivity",
-          activityId: String(parsed.activityId),
-          targetDayId: String(parsed.targetDayId),
-          targetIndex: Number(parsed.targetIndex ?? 0)
-        });
-      }
-      if (toolCall.function.name === "set_transport_leg") {
-        transportRequests.push({
-          dayId: String(parsed.dayId),
-          fromActivityId: String(parsed.fromActivityId),
-          toActivityId: String(parsed.toActivityId),
-          mode: parseRouteMode(parsed.mode)
-        });
-      }
-      if (toolCall.function.name === "compare_transport_modes") {
-        transportComparisonRequests.push({
-          dayId: String(parsed.dayId),
-          fromActivityId: String(parsed.fromActivityId),
-          toActivityId: String(parsed.toActivityId),
-          modes: parseRouteModesFromTool(parsed.modes),
-          strategy: parsed.strategy === "shortest" ? "shortest" : "fastest"
-        });
-      }
-      if (toolCall.function.name === "remove_transport_leg") {
-        transportRemovalRequests.push({
-          dayId: String(parsed.dayId),
-          fromActivityId: String(parsed.fromActivityId),
-          toActivityId: String(parsed.toActivityId)
-        });
-      }
-      if (toolCall.function.name === "complete_transport_legs") {
-        completeTransportMode = parseRouteMode(parsed.mode);
-      }
-      if (toolCall.function.name === "adjust_timing_conflict") {
-        timingAdjustmentRequests.push({
-          dayId: String(parsed.dayId),
-          fromActivityId: String(parsed.fromActivityId),
-          toActivityId: String(parsed.toActivityId),
-          strategy: parseTimingAdjustmentStrategyFromTool(parsed.strategy)
-        });
-      }
-      if (toolCall.function.name === "import_skill") {
-        currentImportedSkillIds = unique([...currentImportedSkillIds, String(parsed.skillId)]);
-      }
-      if (toolCall.function.name === "update_itinerary_details") {
-        itineraryDetailChanges.push(parseItineraryDetailChanges(parsed));
+      if (repeatedToolCall) break;
+      if (turnIndex === maxTurns) {
+        stoppedByMaxTurns = true;
       }
     }
-    const addedStructuredActivity =
-      patchOperations.some((operation) => operation.type === "addActivity") || placeActivityRequests.length > 0;
+
+    if (stoppedByMaxTurns) {
+      assistantContent = `已达到配置的最大模型回合数（${maxTurns}），我先保留已经完成的修改。`;
+      this.emitRunEvent(context, maxTurns, "final_signal", "completed", "达到最大模型回合数", assistantContent, "CriticAgent");
+      finalSignalEmitted = true;
+    }
+
+    if (!finalSignalEmitted) {
+      this.emitRunEvent(
+        context,
+        maxTurns,
+        "final_signal",
+        "completed",
+        "模型工具循环结束",
+        assistantContent || "工具循环已结束，进入校验保存。",
+        "CriticAgent"
+      );
+      finalSignalEmitted = true;
+      await this.pauseAfterEventFlush(context, input.signal);
+    }
+
+    const memoryMutation = this.syncMemoriesFromMessage(input.message, state.traces, sessionId);
+    if (memoryMutation.created.length > 0) {
+      this.emitRunEvent(
+        context,
+        maxTurns + 1,
+        "state_patch",
+        "completed",
+        "沉淀全局记忆",
+        `新增 ${memoryMutation.created.length} 条记忆`,
+        "MainAgent",
+        { output: { created: memoryMutation.created.map((memory) => memory.content) } }
+      );
+    }
+    if (state.addedStructuredActivity) {
+      const diffStart = state.diff.length;
+      state.itinerary = await this.resolveMissingPlaces(state.itinerary, state.traces, sessionId, state.diff, input.signal);
+      if (state.diff.length > diffStart) {
+        this.emitRunEvent(
+          context,
+          maxTurns + 1,
+          "state_patch",
+          "completed",
+          "补全地点坐标",
+          state.diff.slice(diffStart).join("；"),
+          "AttractionAgent",
+          { output: { diff: state.diff.slice(diffStart) } }
+        );
+      }
+    }
     const routeCompletionMode =
-      completeTransportMode ??
-      (addedStructuredActivity &&
-      transportRequests.length === 0 &&
-      transportComparisonRequests.length === 0 &&
-      hasRouteCompletionIntent(input.message)
+      state.completeTransportMode ??
+      (state.addedStructuredActivity && !state.usedTransportTool && hasRouteCompletionIntent(input.message)
         ? (parseRouteModeFromMessage(input.message) ?? "walking")
         : undefined);
-
-    const patch: ItineraryPatch = {
-      source: "agent",
-      reason: message?.content || input.message,
-      operations: patchOperations
-    };
-    const patched = applyItineraryPatch(
-      {
-        ...itinerary,
-        importedSkillIds: currentImportedSkillIds
-      },
-      patch
-    );
-    throwIfAborted(input.signal);
-    let saved = this.itineraries.save(patched.itinerary);
-    const detailDiff: string[] = [];
-    for (const changes of itineraryDetailChanges) {
-      throwIfAborted(input.signal);
-      saved = this.applyItineraryDetailChanges(saved, changes, detailDiff);
-    }
-    saved = this.applyConversationPreferences(saved, input.message, traces, sessionId, detailDiff);
-    for (const request of placeUpdateRequests) {
-      saved = await this.applyPlaceUpdateTool(saved, request, traces, sessionId, placeDiff, input.signal);
-    }
-    for (const request of placeActivityRequests) {
-      saved = await this.applyPlaceActivityTool(saved, request, traces, sessionId, placeDiff, input.signal);
-    }
-    saved = await this.resolveMissingPlaces(saved, traces, sessionId, placeDiff, input.signal);
-    for (const request of transportRemovalRequests) {
-      saved = this.applyTransportRemovalTool(saved, request, traces, sessionId, transportDiff);
-    }
-    for (const request of transportComparisonRequests) {
-      saved = await this.applyTransportComparisonTool(saved, request, traces, sessionId, transportDiff, input.signal);
-    }
-    for (const request of transportRequests) {
-      saved = await this.applyTransportTool(saved, request, traces, sessionId, transportDiff, input.signal);
-    }
     if (routeCompletionMode) {
-      saved = await this.completeMissingTransportLegs(saved, routeCompletionMode, traces, sessionId, transportDiff, input.signal);
+      const diffStart = state.diff.length;
+      this.emitRunEvent(context, maxTurns + 1, "tool_call", "running", "complete_transport_legs", "补全缺失的相邻交通路线。", "TransportAgent", {
+        input: { mode: routeCompletionMode }
+      });
+      state.itinerary = await this.completeMissingTransportLegs(state.itinerary, routeCompletionMode, state.traces, sessionId, state.diff, input.signal);
+      this.emitRunEvent(
+        context,
+        maxTurns + 1,
+        "tool_result",
+        "completed",
+        "补全交通路线",
+        state.diff.slice(diffStart).join("；") || "没有发现需要补全的交通路线。",
+        "TransportAgent",
+        { output: { diff: state.diff.slice(diffStart) } }
+      );
     }
-    const timingDiff: string[] = [];
-    for (const request of timingAdjustmentRequests) {
-      saved = this.applyTimingAdjustmentTool(saved, request, traces, sessionId, timingDiff);
-    }
-    const resultDiff = [...patched.diff, ...detailDiff, ...placeDiff, ...transportDiff, ...timingDiff];
-    traces.push(this.trace(sessionId, "CriticAgent", "state_patch", "校验并保存行程", resultDiff.join("；") || "无结构化变更"));
+
+    state.traces.push(this.trace(sessionId, "CriticAgent", "state_patch", "校验并保存行程", state.diff.join("；") || "无结构化变更"));
+    this.emitRunEvent(
+      context,
+      maxTurns + 1,
+      "state_patch",
+      "completed",
+      "校验并保存行程",
+      state.diff.join("；") || "无结构化变更",
+      "CriticAgent"
+    );
+    await this.pauseAfterEventFlush(context, input.signal);
     throwIfAborted(input.signal);
-    for (const trace of traces) this.db.saveTrace(trace);
+    for (const trace of state.traces) this.db.saveTrace(trace);
 
     const userMessage: ChatMessage = {
       id: createId("msg"),
@@ -336,24 +356,18 @@ export class AgentService {
     const assistantMessage: ChatMessage = {
       id: createId("msg"),
       role: "assistant",
-      content: message?.content || (resultDiff.length > 0 ? "已更新行程。" : "当前没有结构变化。"),
+      content: assistantContent || (state.diff.length > 0 ? "已更新行程。" : "当前没有结构变化。"),
       createdAt: nowIso()
     };
-    const contextSummary = summarizeSession(input.message, saved, importedSkills.map((skill) => skill.displayName), previousSessions);
-    const finalPreferenceSummary = inferPreferenceSummary(
-      saved.preferences,
-      importedSkills.map((skill) => skill.displayName),
-      previousSessions,
-      input.message
-    );
+    const contextSummary = summarizeSession(input.message, state.itinerary, importedSkills.map((skill) => skill.displayName), memorySnapshotText);
     const session: AgentSession = {
       id: sessionId,
-      itineraryId: saved.id,
+      itineraryId: state.itinerary.id,
       messages: [userMessage, assistantMessage],
-      importedSkillIds: currentImportedSkillIds,
-      traces,
+      importedSkillIds: state.importedSkillIds,
+      traces: state.traces,
       contextSummary,
-      userPreferenceSummary: finalPreferenceSummary,
+      memorySnapshotText,
       createdAt: nowIso(),
       updatedAt: nowIso()
     };
@@ -361,316 +375,408 @@ export class AgentService {
     this.db.saveSession(session);
 
     return {
-      itinerary: saved,
+      itinerary: state.itinerary,
       message: assistantMessage,
-      diff: resultDiff,
-      traces,
+      diff: state.diff,
+      traces: state.traces,
+      events: context.events,
       session
     };
   }
 
-  private async runDeterministic(input: AgentRunInput): Promise<AgentRunResult> {
-    throwIfAborted(input.signal);
-    const itinerary = this.itineraries.get(input.itineraryId);
-    const importedSkillIds = unique([...(itinerary.importedSkillIds ?? []), ...(input.importedSkillIds ?? [])]);
-    const importedSkills = importedSkillIds.map((id) => this.skills.get(id)).filter(Boolean);
-    const previousSessions = this.db
-      .listSessions()
-      .filter((session) => session.itineraryId === itinerary.id)
-      .slice(0, 5);
-    const preferenceSummary = inferPreferenceSummary(
-      itinerary.preferences,
-      importedSkills.map((skill) => skill.displayName),
-      previousSessions,
-      input.message
-    );
-    const sessionId = createId("session");
-    const routeConflictProposal = buildRouteConflictProposal(itinerary, input.message);
-    if (routeConflictProposal) {
-      const traces: AgentTraceEvent[] = [
-        this.trace(sessionId, "MainAgent", "message", "理解用户目标", input.message),
-        this.trace(
-          sessionId,
-          "MainAgent",
-          "message",
-          "读取历史偏好",
-          previousSessions.length ? preferenceSummary : "还没有历史会话，使用当前行程偏好。"
-        ),
-        this.trace(sessionId, "TransportAgent", "tool_call", "检查路线冲突", routeConflictProposal.traceDetail),
-        this.trace(sessionId, "PlannerAgent", "message", "提出路线修复方案", "仅提供方案，等待用户选择后再修改画布。"),
-        this.trace(sessionId, "CriticAgent", "message", "确认未修改画布", "本轮 diff 为空。")
-      ];
-      const saved = itinerary;
-      for (const trace of traces) this.db.saveTrace(trace);
-      const userMessage: ChatMessage = {
-        id: createId("msg"),
-        role: "user",
-        content: input.message,
-        createdAt: nowIso()
-      };
-      const assistantMessage: ChatMessage = {
-        id: createId("msg"),
-        role: "assistant",
-        content: routeConflictProposal.content,
-        createdAt: nowIso()
-      };
-      const session: AgentSession = {
-        id: sessionId,
-        itineraryId: saved.id,
-        messages: [userMessage, assistantMessage],
-        importedSkillIds,
-        traces,
-        contextSummary: summarizeSession(input.message, saved, importedSkills.map((skill) => skill.displayName), previousSessions),
-        userPreferenceSummary: inferPreferenceSummary(
-          saved.preferences,
-          importedSkills.map((skill) => skill.displayName),
-          previousSessions,
-          input.message
-        ),
-        createdAt: nowIso(),
-        updatedAt: nowIso()
-      };
-      this.db.saveSession(session);
-      return {
-        itinerary: saved,
-        message: assistantMessage,
-        diff: [],
-        traces,
-        session
-      };
-    }
-    const activityUpdateOperations = parseDeterministicActivityUpdates(itinerary, input.message);
-    const activityMoveOperations = parseDeterministicActivityMoves(itinerary, input.message);
-    const activityRemoveOperations = parseDeterministicActivityRemovals(itinerary, input.message);
-    const deterministicPlaceActivityRequests = parseDeterministicPlaceActivityRequests(itinerary, input.message);
-    const placeUpdateRequests = parseDeterministicPlaceUpdates(itinerary, input.message);
-    const deterministicTransportComparisonRequests = parseDeterministicTransportComparisonRequests(itinerary, input.message);
-    const deterministicTransportRequests =
-      deterministicTransportComparisonRequests.length > 0 ? [] : parseDeterministicTransportRequests(itinerary, input.message);
-    const deterministicTransportRemovalRequests = parseDeterministicTransportRemovalRequests(itinerary, input.message);
-    const deterministicTimingAdjustmentRequests = parseDeterministicTimingAdjustmentRequests(itinerary, input.message);
-    const deterministicDetails = parseDeterministicItineraryDetails(itinerary, input.message, {
-      activityScoped:
-        activityUpdateOperations.length > 0 ||
-        activityMoveOperations.length > 0 ||
-        activityRemoveOperations.length > 0 ||
-        deterministicPlaceActivityRequests.length > 0 ||
-        placeUpdateRequests.length > 0 ||
-        deterministicTransportComparisonRequests.length > 0 ||
-        deterministicTransportRemovalRequests.length > 0 ||
-        deterministicTimingAdjustmentRequests.length > 0
-    });
-    const routeOnlyIntent = deterministicTransportRequests.length === 0 && isDeterministicRouteOnlyRequest(input.message);
-    const activityIntent = shouldAddDeterministicActivity(
-      input.message,
-      deterministicDetails,
-      routeOnlyIntent,
-      activityMoveOperations.length > 0 ||
-        activityUpdateOperations.length > 0 ||
-        activityRemoveOperations.length > 0 ||
-        deterministicPlaceActivityRequests.length > 0 ||
-        placeUpdateRequests.length > 0 ||
-        deterministicTransportComparisonRequests.length > 0 ||
-        deterministicTransportRemovalRequests.length > 0 ||
-        deterministicTimingAdjustmentRequests.length > 0
-    );
-    const traces: AgentTraceEvent[] = [
-      this.trace(sessionId, "MainAgent", "message", "理解用户目标", input.message),
-      this.trace(
-        sessionId,
-        "MainAgent",
-        "message",
-        "读取历史偏好",
-        previousSessions.length ? preferenceSummary : "还没有历史会话，使用当前行程偏好。"
-      ),
-      this.trace(
-        sessionId,
-        "StyleAgent",
-        "tool_call",
-        "融合旅行风格 Skill",
-        importedSkills.length ? importedSkills.map((skill) => skill.displayName).join("、") : "未导入 Skill，使用用户偏好。"
-      ),
-      this.trace(sessionId, "TransportAgent", "tool_call", "检查路线可行性", "使用高德路线服务，演示环境返回 mock 路线。"),
-      this.trace(
-        sessionId,
-        "AttractionAgent",
-        "tool_call",
-        deterministicPlaceActivityRequests.length > 0 ? "搜索并加入地点" : activityIntent ? "补充景点候选" : "跳过活动新增",
-        deterministicPlaceActivityRequests.length > 0
-          ? "识别到用户点名地点，交给地点工具搜索 POI 后写入画布。"
-          : activityIntent
-            ? "根据目的地和风格补充轻量活动。"
-            : "本轮请求不需要新增活动。"
-      ),
-      this.trace(
-        sessionId,
-        "PlannerAgent",
-        "state_patch",
-        "生成结构化行程补丁",
-        activityUpdateOperations.length > 0
-          ? "更新用户点名的已有活动。"
-          : placeUpdateRequests.length > 0
-            ? "替换用户点名活动的地点。"
-          : activityRemoveOperations.length > 0
-            ? "删除用户点名的已有活动。"
-          : deterministicPlaceActivityRequests.length > 0
-            ? "新增用户点名的地点活动。"
-          : deterministicTransportComparisonRequests.length > 0
-            ? "比较并选择交通方式。"
-          : deterministicTransportRemovalRequests.length > 0
-            ? "取消用户点名的交通段。"
-          : deterministicTimingAdjustmentRequests.length > 0
-            ? "修复交通晚到后的时间冲突。"
-          : activityIntent
-            ? "补全空白时段，并保留用户锁定内容。"
-            : "仅处理用户明确请求的结构化变更。"
-      ),
-      this.trace(sessionId, "CriticAgent", "handoff", "检查需求覆盖", "确认慢节奏、交通和手动编辑保护。")
-    ];
+  private createRunContext(sessionId: string, options: AgentRunOptions): AgentRunContext {
+    return {
+      sessionId,
+      events: [],
+      sequence: 0,
+      onEvent: options.onEvent
+    };
+  }
 
-    const targetDay = itinerary.days[1] ?? itinerary.days[0];
-    if (!targetDay) throw new Error("Itinerary has no editable day");
-    const skillInfluence = chooseSkillInfluence(importedSkills);
-    const addActivityOperations: ItineraryPatchOperation[] = activityIntent
-      ? [
+  private emitRunEvent(
+    context: AgentRunContext,
+    turnIndex: number,
+    type: AgentRunEvent["type"],
+    status: AgentRunEvent["status"],
+    title: string,
+    detail: string,
+    agent?: AgentName,
+    technical?: AgentRunEvent["technical"]
+  ): AgentRunEvent {
+    const event: AgentRunEvent = {
+      id: createId("event"),
+      sessionId: context.sessionId,
+      turnIndex,
+      sequence: ++context.sequence,
+      type,
+      status,
+      title,
+      detail,
+      agent,
+      technical,
+      createdAt: nowIso()
+    };
+    context.events.push(event);
+    context.onEvent?.(event);
+    return event;
+  }
+
+  private emitTraceEvent(context: AgentRunContext, trace: AgentTraceEvent): AgentRunEvent {
+    return this.emitRunEvent(
+      context,
+      0,
+      traceTypeToRunEventType(trace.type),
+      trace.type === "error" ? "failed" : "completed",
+      trace.title,
+      trace.detail,
+      trace.agent
+    );
+  }
+
+  private async pauseAfterEventFlush(context: AgentRunContext, signal?: AbortSignal): Promise<void> {
+    if (!context.onEvent) return;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    throwIfAborted(signal);
+  }
+
+  private async executeChatCompletionToolCall(
+    state: ChatCompletionExecutionState,
+    toolName: string,
+    parsed: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<ChatCompletionToolExecutionResult> {
+    const diffStart = state.diff.length;
+    try {
+      if (toolName === "add_activity") {
+        state.addedStructuredActivity = true;
+        state.itinerary = this.applySinglePatchOperation(
+          state.itinerary,
+          state.importedSkillIds,
           {
             type: "addActivity",
-            dayId: targetDay.id,
+            dayId: String(parsed.dayId),
             activity: {
-              type: "free_time",
-              title: chooseActivityTitle(input.message, importedSkills, skillInfluence),
-              startTime: "15:00",
-              endTime: "17:00",
-              description: skillInfluence
-                ? `已应用「${skillInfluence.skill.displayName}」规则：${skillInfluence.rule}。可在行程中继续手动调整。`
-                : "已根据你的要求补充，可在行程中继续手动调整。",
-              tags: skillInfluence ? ["风格规则", "可调整"] : ["慢节奏", "可调整"],
-              budgetCny: 80,
-              transportNote: "同区域内移动，避免跨城奔波。"
+              type: parseActivityType(parsed.type),
+              title: String(parsed.title),
+              placeName: asOptionalString(parsed.placeName),
+              startTime: asOptionalString(parsed.startTime),
+              endTime: asOptionalString(parsed.endTime),
+              description: asOptionalString(parsed.description),
+              budgetCny: asOptionalNumber(parsed.budgetCny),
+              transportNote: asOptionalString(parsed.transportNote),
+              tags: asStringList(parsed.tags)
             }
+          },
+          state.diff
+        );
+      } else if (toolName === "add_place_activity") {
+        state.addedStructuredActivity = true;
+        state.itinerary = await this.applyPlaceActivityTool(
+          state.itinerary,
+          {
+            dayId: String(parsed.dayId),
+            query: String(parsed.query ?? parsed.poiName ?? parsed.title ?? ""),
+            poiName: asOptionalString(parsed.poiName),
+            type: parseActivityType(parsed.type),
+            title: String(parsed.title ?? parsed.poiName ?? parsed.query ?? "新的地点"),
+            startTime: asOptionalString(parsed.startTime),
+            endTime: asOptionalString(parsed.endTime),
+            description: asOptionalString(parsed.description),
+            budgetCny: asOptionalNumber(parsed.budgetCny),
+            tags: asStringList(parsed.tags)
+          },
+          state.traces,
+          state.sessionId,
+          state.diff,
+          signal
+        );
+      } else if (toolName === "update_activity_place") {
+        state.itinerary = await this.applyPlaceUpdateTool(
+          state.itinerary,
+          {
+            activityId: String(parsed.activityId),
+            query: String(parsed.query ?? parsed.poiName ?? parsed.title ?? ""),
+            poiName: asOptionalString(parsed.poiName),
+            type: parsed.type ? parseActivityType(parsed.type) : undefined,
+            title: asOptionalString(parsed.title)
+          },
+          state.traces,
+          state.sessionId,
+          state.diff,
+          signal
+        );
+      } else if (toolName === "update_activity") {
+        state.itinerary = this.applySinglePatchOperation(
+          state.itinerary,
+          state.importedSkillIds,
+          {
+            type: "updateActivity",
+            activityId: String(parsed.activityId),
+            changes: parsed.changes as Partial<Activity>
+          },
+          state.diff
+        );
+      } else if (toolName === "remove_activity") {
+        state.itinerary = this.applySinglePatchOperation(
+          state.itinerary,
+          state.importedSkillIds,
+          { type: "removeActivity", activityId: String(parsed.activityId) },
+          state.diff
+        );
+      } else if (toolName === "move_activity") {
+        state.itinerary = this.applySinglePatchOperation(
+          state.itinerary,
+          state.importedSkillIds,
+          {
+            type: "moveActivity",
+            activityId: String(parsed.activityId),
+            targetDayId: String(parsed.targetDayId),
+            targetIndex: Number(parsed.targetIndex ?? 0)
+          },
+          state.diff
+        );
+      } else if (toolName === "set_transport_leg") {
+        state.usedTransportTool = true;
+        state.itinerary = await this.applyTransportTool(
+          state.itinerary,
+          {
+            dayId: String(parsed.dayId),
+            fromActivityId: String(parsed.fromActivityId),
+            toActivityId: String(parsed.toActivityId),
+            mode: parseRouteMode(parsed.mode)
+          },
+          state.traces,
+          state.sessionId,
+          state.diff,
+          signal
+        );
+      } else if (toolName === "compare_transport_modes") {
+        state.usedTransportTool = true;
+        state.itinerary = await this.applyTransportComparisonTool(
+          state.itinerary,
+          {
+            dayId: String(parsed.dayId),
+            fromActivityId: String(parsed.fromActivityId),
+            toActivityId: String(parsed.toActivityId),
+            modes: parseRouteModesFromTool(parsed.modes),
+            strategy: parsed.strategy === "shortest" ? "shortest" : "fastest"
+          },
+          state.traces,
+          state.sessionId,
+          state.diff,
+          signal
+        );
+      } else if (toolName === "remove_transport_leg") {
+        state.usedTransportTool = true;
+        state.itinerary = this.applyTransportRemovalTool(
+          state.itinerary,
+          {
+            dayId: String(parsed.dayId),
+            fromActivityId: String(parsed.fromActivityId),
+            toActivityId: String(parsed.toActivityId)
+          },
+          state.traces,
+          state.sessionId,
+          state.diff
+        );
+      } else if (toolName === "complete_transport_legs") {
+        state.usedTransportTool = true;
+        state.completeTransportMode = parseRouteMode(parsed.mode);
+        state.itinerary = await this.completeMissingTransportLegs(
+          state.itinerary,
+          state.completeTransportMode,
+          state.traces,
+          state.sessionId,
+          state.diff,
+          signal
+        );
+      } else if (toolName === "adjust_timing_conflict") {
+        state.usedTransportTool = true;
+        state.itinerary = this.applyTimingAdjustmentTool(
+          state.itinerary,
+          {
+            dayId: String(parsed.dayId),
+            fromActivityId: String(parsed.fromActivityId),
+            toActivityId: String(parsed.toActivityId),
+            strategy: parseTimingAdjustmentStrategyFromTool(parsed.strategy)
+          },
+          state.traces,
+          state.sessionId,
+          state.diff
+        );
+      } else if (toolName === "import_skill") {
+        state.importedSkillIds = unique([...state.importedSkillIds, String(parsed.skillId)]);
+        state.itinerary = this.itineraries.save({ ...state.itinerary, importedSkillIds: state.importedSkillIds });
+        state.diff.push("已导入风格");
+      } else if (toolName === "update_itinerary_details") {
+        state.itinerary = this.applyItineraryDetailChanges(state.itinerary, parseItineraryDetailChanges(parsed), state.diff);
+      } else if (toolName === "list_saved_memories") {
+        return {
+          status: "completed",
+          title: "list_saved_memories 执行完成",
+          summary: "已返回已保存记忆列表。",
+          diff: [],
+          output: { items: this.memories.list({ query: asOptionalString(parsed.query), limit: asOptionalNumber(parsed.limit) }) }
+        };
+      } else if (toolName === "create_saved_memory") {
+        const memory = this.memories.create(String(parsed.content ?? ""));
+        return {
+          status: "completed",
+          title: "create_saved_memory 执行完成",
+          summary: `已新增记忆：${memory.content}`,
+          diff: [],
+          output: { memory }
+        };
+      } else if (toolName === "update_saved_memory") {
+        const memory = this.memories.update(String(parsed.memoryId ?? ""), String(parsed.content ?? ""));
+        return {
+          status: "completed",
+          title: "update_saved_memory 执行完成",
+          summary: `已更新记忆：${memory.content}`,
+          diff: [],
+          output: { memory }
+        };
+      } else if (toolName === "delete_saved_memory") {
+        this.memories.delete(String(parsed.memoryId ?? ""));
+        return {
+          status: "completed",
+          title: "delete_saved_memory 执行完成",
+          summary: "已删除指定记忆。",
+          diff: [],
+          output: { deleted: true }
+        };
+      } else if (toolName === "list_itineraries") {
+        return {
+          status: "completed",
+          title: "list_itineraries 执行完成",
+          summary: "已返回历史行程列表。",
+          diff: [],
+          output: { items: this.history.listItineraries({ query: asOptionalString(parsed.query), limit: asOptionalNumber(parsed.limit) }) }
+        };
+      } else if (toolName === "search_itinerary_conversations") {
+        return {
+          status: "completed",
+          title: "search_itinerary_conversations 执行完成",
+          summary: "已返回历史对话搜索结果。",
+          diff: [],
+          output: {
+            items: this.history.searchConversations({
+              keyword: String(parsed.keyword ?? ""),
+              itineraryQuery: asOptionalString(parsed.itineraryQuery),
+              limit: asOptionalNumber(parsed.limit)
+            })
           }
-        ]
-      : [];
+        };
+      } else if (toolName === "load_itinerary_conversation") {
+        return {
+          status: "completed",
+          title: "load_itinerary_conversation 执行完成",
+          summary: "已加载指定行程的完整对话时间线。",
+          diff: [],
+          output: this.history.loadConversation(String(parsed.itineraryId ?? ""))
+        };
+      } else if (toolName === "search_poi") {
+        const items = await this.maps.searchPoi(String(parsed.query ?? ""), asOptionalString(parsed.city) ?? NATIONAL_POI_SEARCH_CITY);
+        const limit = clampPositiveInt(asOptionalNumber(parsed.limit), 5, 20);
+        return {
+          status: "completed",
+          title: "search_poi 执行完成",
+          summary: items.length > 0 ? `已找到 ${Math.min(items.length, limit)} 个地点候选。` : "没有找到匹配地点。",
+          diff: [],
+          output: { items: items.slice(0, limit) }
+        };
+      } else if (toolName === "preview_transport_modes") {
+        const from = await this.resolvePoiQuery(String(parsed.fromQuery ?? parsed.from ?? ""), asOptionalString(parsed.fromPoiName), signal);
+        const to = await this.resolvePoiQuery(String(parsed.toQuery ?? parsed.to ?? ""), asOptionalString(parsed.toPoiName), signal);
+        const modes = parseRouteModesFromTool(parsed.modes);
+        const strategy = parsed.strategy === "shortest" ? "shortest" : "fastest";
+        const routes: RouteSummary[] = [];
+        for (const mode of modes) {
+          throwIfAborted(signal);
+          routes.push(await this.maps.route(from.routePoint, to.routePoint, mode));
+        }
+        const ranked = routes
+          .slice()
+          .sort((left, right) =>
+            strategy === "shortest"
+              ? left.distanceMeters - right.distanceMeters || left.durationMinutes - right.durationMinutes
+              : left.durationMinutes - right.durationMinutes || left.distanceMeters - right.distanceMeters
+          );
+        return {
+          status: "completed",
+          title: "preview_transport_modes 执行完成",
+          summary: `已返回 ${ranked.length} 种交通方式对比。`,
+          diff: [],
+          output: {
+            from: summarizePoiCandidate(from.poi),
+            to: summarizePoiCandidate(to.poi),
+            strategy,
+            routes: ranked
+          }
+        };
+      } else if (toolName === "get_day_weather") {
+        const weather = await this.maps.weather(String(parsed.city ?? ""), String(parsed.date ?? ""));
+        return {
+          status: "completed",
+          title: "get_day_weather 执行完成",
+          summary: `已返回 ${weather.city} ${weather.date} 的天气。`,
+          diff: [],
+          output: { weather }
+        };
+      } else {
+        const detail = `未知工具：${toolName}`;
+        state.traces.push(this.trace(state.sessionId, "MainAgent", "error", "未知工具调用", detail));
+        return {
+          status: "failed",
+          title: "工具调用失败",
+          summary: detail,
+          diff: [],
+          output: { error: detail }
+        };
+      }
+      const diff = state.diff.slice(diffStart);
+      return {
+        status: "completed",
+        title: `${toolName} 执行完成`,
+        summary: diff.length ? diff.join("；") : "工具已执行，未产生结构化改动。",
+        diff,
+        output: {
+          diff,
+          itinerary: summarizeItineraryForToolObservation(state.itinerary)
+        }
+      };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "工具执行失败";
+      state.traces.push(this.trace(state.sessionId, toolAgent(toolName), "error", `${toolName} 执行失败`, detail));
+      return {
+        status: "failed",
+        title: `${toolName} 执行失败`,
+        summary: detail,
+        diff: state.diff.slice(diffStart),
+        output: { error: detail }
+      };
+    }
+  }
 
-    const patch: ItineraryPatch = {
-      source: "agent",
-      reason: "根据用户对话和导入 Skill 补全空白时段",
-      operations: [...activityUpdateOperations, ...activityMoveOperations, ...activityRemoveOperations, ...addActivityOperations]
-    };
-
+  private applySinglePatchOperation(
+    itinerary: TravelItinerary,
+    importedSkillIds: string[],
+    operation: ItineraryPatchOperation,
+    diff: string[]
+  ): TravelItinerary {
     const patched = applyItineraryPatch(
       {
         ...itinerary,
         importedSkillIds
       },
-      patch
+      {
+        source: "agent",
+        reason: "模型工具调用",
+        operations: [operation]
+      }
     );
-    throwIfAborted(input.signal);
-    let saved = this.itineraries.save(patched.itinerary);
-    const detailDiff: string[] = [];
-    if (Object.keys(deterministicDetails).length > 0) {
-      throwIfAborted(input.signal);
-      saved = this.applyItineraryDetailChanges(saved, deterministicDetails, detailDiff);
-    }
-    saved = this.applyConversationPreferences(saved, input.message, traces, sessionId, detailDiff);
-    const deterministicPlaceDiff: string[] = [];
-    for (const request of placeUpdateRequests) {
-      saved = await this.applyPlaceUpdateTool(saved, request, traces, sessionId, deterministicPlaceDiff, input.signal);
-    }
-    for (const request of deterministicPlaceActivityRequests) {
-      saved = await this.applyPlaceActivityTool(saved, request, traces, sessionId, deterministicPlaceDiff, input.signal);
-    }
-    const placeDiff: string[] = [];
-    if (activityIntent || routeOnlyIntent) {
-      saved = await this.resolveMissingPlaces(saved, traces, sessionId, placeDiff, input.signal);
-    }
-    const transportDiff: string[] = [];
-    for (const request of deterministicTransportRemovalRequests) {
-      saved = this.applyTransportRemovalTool(saved, request, traces, sessionId, transportDiff);
-    }
-    for (const request of deterministicTransportComparisonRequests) {
-      saved = await this.applyTransportComparisonTool(saved, request, traces, sessionId, transportDiff, input.signal);
-    }
-    for (const request of deterministicTransportRequests) {
-      saved = await this.applyTransportTool(saved, request, traces, sessionId, transportDiff, input.signal);
-    }
-    const timingDiff: string[] = [];
-    for (const request of deterministicTimingAdjustmentRequests) {
-      saved = this.applyTimingAdjustmentTool(saved, request, traces, sessionId, timingDiff);
-    }
-    if (activityIntent || routeOnlyIntent || deterministicPlaceActivityRequests.length > 0) {
-      saved = await this.completeMissingTransportLegs(saved, "walking", traces, sessionId, transportDiff, input.signal);
-    }
-    const styleDiff = activityIntent && skillInfluence ? [`已应用风格：${skillInfluence.skill.displayName}`] : [];
-    const weatherDiff: string[] = [];
-    if (
-      patched.diff.length > 0 ||
-      styleDiff.length > 0 ||
-      detailDiff.length > 0 ||
-      deterministicPlaceDiff.length > 0 ||
-      placeDiff.length > 0 ||
-      transportDiff.length > 0 ||
-      timingDiff.length > 0
-    ) {
-      saved = this.applyDeterministicWeather(saved, traces, sessionId, weatherDiff);
-    }
-    const resultDiff = [
-      ...patched.diff,
-      ...styleDiff,
-      ...detailDiff,
-      ...weatherDiff,
-      ...deterministicPlaceDiff,
-      ...placeDiff,
-      ...transportDiff,
-      ...timingDiff
-    ];
-    throwIfAborted(input.signal);
-    for (const trace of traces) this.db.saveTrace(trace);
-
-    const userMessage: ChatMessage = {
-      id: createId("msg"),
-      role: "user",
-      content: input.message,
-      createdAt: nowIso()
-    };
-    const assistantMessage: ChatMessage = {
-      id: createId("msg"),
-      role: "assistant",
-      content:
-        resultDiff.length > 0
-          ? skillInfluence && activityIntent
-            ? `已更新行程，已按「${skillInfluence.skill.displayName}」调整。`
-            : "已更新行程。"
-          : "当前没有结构变化。",
-      createdAt: nowIso()
-    };
-    const finalPreferenceSummary = inferPreferenceSummary(
-      saved.preferences,
-      importedSkills.map((skill) => skill.displayName),
-      previousSessions,
-      input.message
-    );
-    const session: AgentSession = {
-      id: sessionId,
-      itineraryId: saved.id,
-      messages: [userMessage, assistantMessage],
-      importedSkillIds,
-      traces,
-      contextSummary: summarizeSession(input.message, saved, importedSkills.map((skill) => skill.displayName), previousSessions),
-      userPreferenceSummary: finalPreferenceSummary,
-      createdAt: nowIso(),
-      updatedAt: nowIso()
-    };
-    throwIfAborted(input.signal);
-    this.db.saveSession(session);
-
-    return {
-      itinerary: saved,
-      message: assistantMessage,
-      diff: resultDiff,
-      traces,
-      session
-    };
+    diff.push(...patched.diff);
+    return this.itineraries.save(patched.itinerary);
   }
 
   private async resolveMissingPlaces(
@@ -685,7 +791,7 @@ export class AgentService {
       for (const activity of day.activities) {
         throwIfAborted(signal);
         if (activity.source !== "agent" || !activity.placeName || activity.place?.coordinates) continue;
-        const places = await this.maps.searchPoi(activity.placeName, activity.place?.city ?? current.destination);
+        const places = await this.maps.searchPoi(activity.placeName, activity.place?.city ?? NATIONAL_POI_SEARCH_CITY);
         throwIfAborted(signal);
         const place = places[0];
         if (!place) continue;
@@ -708,6 +814,22 @@ export class AgentService {
     return current;
   }
 
+  private async resolvePoiQuery(query: string, poiName?: string, signal?: AbortSignal): Promise<{ poi: PoiResult; routePoint: string }> {
+    throwIfAborted(signal);
+    const candidates = await this.maps.searchPoi(query, NATIONAL_POI_SEARCH_CITY);
+    throwIfAborted(signal);
+    const selected =
+      (poiName
+        ? candidates.find((candidate) => candidate.name === poiName) ??
+          candidates.find((candidate) => candidate.name.includes(poiName))
+        : undefined) ?? candidates[0];
+    if (!selected) throw new Error(`没有找到地点：${query}`);
+    return {
+      poi: selected,
+      routePoint: `${selected.location.lng},${selected.location.lat}`
+    };
+  }
+
   private async applyPlaceActivityTool(
     itinerary: TravelItinerary,
     request: PlaceActivityToolRequest,
@@ -717,7 +839,7 @@ export class AgentService {
     signal?: AbortSignal
   ): Promise<TravelItinerary> {
     throwIfAborted(signal);
-    const candidates = await this.maps.searchPoi(request.query, itinerary.destination);
+    const candidates = await this.maps.searchPoi(request.query, NATIONAL_POI_SEARCH_CITY);
     throwIfAborted(signal);
     const selected =
       (request.poiName
@@ -766,7 +888,7 @@ export class AgentService {
     signal?: AbortSignal
   ): Promise<TravelItinerary> {
     throwIfAborted(signal);
-    const candidates = await this.maps.searchPoi(request.query, itinerary.destination);
+    const candidates = await this.maps.searchPoi(request.query, NATIONAL_POI_SEARCH_CITY);
     throwIfAborted(signal);
     const selected =
       (request.poiName
@@ -843,7 +965,6 @@ export class AgentService {
       durationMinutes: route.durationMinutes,
       provider: route.source,
       routeStatus: route.status,
-      failureReason: route.fallbackReason,
       summary: route.summary,
       polyline: route.polyline ?? [],
       steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, toName)
@@ -907,7 +1028,6 @@ export class AgentService {
       durationMinutes: selected.durationMinutes,
       provider: selected.source,
       routeStatus: selected.status,
-      failureReason: selected.fallbackReason,
       summary: selected.summary,
       polyline: selected.polyline ?? [],
       steps: localizeRouteSteps(selected.steps ?? [], selected.source, selected.mode, toName)
@@ -1124,27 +1244,27 @@ export class AgentService {
     const before = itinerary;
     const saved = this.itineraries.update(itinerary.id, changes);
     if (before.startDate !== saved.startDate || before.endDate !== saved.endDate) diff.push("已更新日期范围");
-    if (before.destination !== saved.destination) diff.push("已更新目的地");
+    if (before.destination !== saved.destination) diff.push("已更新出发点");
     if (before.budgetCny !== saved.budgetCny) diff.push("已更新预算");
     if (before.notes !== saved.notes) diff.push("已更新备注");
-    if (before.preferences.join("|") !== saved.preferences.join("|")) diff.push("已更新偏好");
     if (before.companions.join("|") !== saved.companions.join("|")) diff.push("已更新同行人");
     return saved;
   }
 
-  private applyConversationPreferences(
-    itinerary: TravelItinerary,
+  private syncMemoriesFromMessage(
     message: string,
     traces: AgentTraceEvent[],
-    sessionId: string,
-    diff: string[]
-  ): TravelItinerary {
-    const learnedPreferences = extractConversationPreferences(message);
-    if (!learnedPreferences.length) return itinerary;
-    const nextPreferences = unique([...itinerary.preferences, ...learnedPreferences]);
-    if (nextPreferences.join("|") === itinerary.preferences.join("|")) return itinerary;
-    traces.push(this.trace(sessionId, "MainAgent", "state_patch", "沉淀对话偏好", learnedPreferences.join("、")));
-    return this.applyItineraryDetailChanges(itinerary, { preferences: nextPreferences }, diff);
+    sessionId: string
+  ): { created: SavedMemory[] } {
+    const learnedPreferences = extractConversationMemories(message);
+    if (!learnedPreferences.length) return { created: [] };
+    const mutation = this.memories.upsertMany(learnedPreferences);
+    if (mutation.created.length > 0) {
+      traces.push(
+        this.trace(sessionId, "MainAgent", "state_patch", "沉淀全局记忆", mutation.created.map((memory) => memory.content).join("、"))
+      );
+    }
+    return mutation;
   }
 
   private async completeMissingTransportLegs(
@@ -1158,20 +1278,15 @@ export class AgentService {
     let current = itinerary;
     let completed = 0;
     for (const day of current.days) {
-      for (let index = 0; index < day.activities.length - 1; index += 1) {
+      for (const pair of getRoutePairsForDay(current, day)) {
         throwIfAborted(signal);
-        const fromActivity = day.activities[index]!;
-        const toActivity = day.activities[index + 1]!;
-        const exists = (day.transportLegs ?? []).some(
-          (leg) => leg.fromActivityId === fromActivity.id && leg.toActivityId === toActivity.id
-        );
-        if (!exists && canRouteActivityPair(fromActivity, toActivity)) {
+        if (!pair.exists) {
           current = await this.applyTransportTool(
             current,
             {
               dayId: day.id,
-              fromActivityId: fromActivity.id,
-              toActivityId: toActivity.id,
+              fromActivityId: pair.fromActivity.id,
+              toActivityId: pair.toActivity.id,
               mode
             },
             traces,
@@ -1213,6 +1328,14 @@ type SkillInfluence = {
   rule: string;
 };
 
+function traceTypeToRunEventType(type: AgentTraceEvent["type"]): AgentRunEvent["type"] {
+  if (type === "message") return "thought_summary";
+  if (type === "tool_call") return "tool_call";
+  if (type === "state_patch") return "state_patch";
+  if (type === "handoff") return "handoff";
+  return "error";
+}
+
 function chooseActivityTitle(message: string, skills: TravelSkill[], influence?: SkillInfluence): string {
   const ruleText = influence?.rule ?? "";
   if (ruleText.includes("雨天") && ruleText.includes("室内") && ruleText.includes("咖啡")) {
@@ -1240,7 +1363,7 @@ function chooseSkillInfluence(skills: TravelSkill[]): SkillInfluence | undefined
   return undefined;
 }
 
-function deepSeekTools() {
+function chatCompletionTools() {
   return [
     {
       type: "function",
@@ -1442,7 +1565,7 @@ function deepSeekTools() {
       type: "function",
       function: {
         name: "update_itinerary_details",
-        description: "更新行程级规划信息。可以改目的地、日期范围、预算、备注、偏好和同行人；不要改行程名称。",
+        description: "更新行程级规划信息。可以改出发点、日期范围、预算、备注和同行人；不要改行程名称。",
         parameters: {
           type: "object",
           properties: {
@@ -1451,7 +1574,6 @@ function deepSeekTools() {
             endDate: { type: "string", description: "YYYY-MM-DD" },
             budgetCny: { type: "number" },
             notes: { type: "string" },
-            preferences: { type: "array", items: { type: "string" } },
             companions: { type: "array", items: { type: "string" } }
           }
         }
@@ -1466,6 +1588,161 @@ function deepSeekTools() {
           type: "object",
           required: ["skillId"],
           properties: { skillId: { type: "string" } }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_saved_memories",
+        description: "列出已保存记忆，可按关键词过滤；仅在需要精确编辑某条记忆时使用。",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "number" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "create_saved_memory",
+        description: "新增一条全局已保存记忆。",
+        parameters: {
+          type: "object",
+          required: ["content"],
+          properties: {
+            content: { type: "string" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "update_saved_memory",
+        description: "更新一条已保存记忆的内容。",
+        parameters: {
+          type: "object",
+          required: ["memoryId", "content"],
+          properties: {
+            memoryId: { type: "string" },
+            content: { type: "string" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "delete_saved_memory",
+        description: "删除一条已保存记忆。",
+        parameters: {
+          type: "object",
+          required: ["memoryId"],
+          properties: {
+            memoryId: { type: "string" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "list_itineraries",
+        description: "列出历史行程，适合用户提到过去某次行程但未给出精确标题时使用。",
+        parameters: {
+          type: "object",
+          properties: {
+            query: { type: "string" },
+            limit: { type: "number" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_itinerary_conversations",
+        description: "按关键词搜索历史行程里的对话记录；仅在用户明显提到过去、之前、上次或历史内容时使用。",
+        parameters: {
+          type: "object",
+          required: ["keyword"],
+          properties: {
+            keyword: { type: "string" },
+            itineraryQuery: { type: "string" },
+            limit: { type: "number" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "load_itinerary_conversation",
+        description: "加载某个行程的完整对话时间线；仅在用户明确要求回看历史时使用。",
+        parameters: {
+          type: "object",
+          required: ["itineraryId"],
+          properties: {
+            itineraryId: { type: "string" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "search_poi",
+        description: "只读搜索 POI 候选，不改画布；适合确认地点是否存在、别名是否匹配、地址属于哪里时使用。",
+        parameters: {
+          type: "object",
+          required: ["query"],
+          properties: {
+            query: { type: "string" },
+            city: { type: "string", description: "可选城市；默认全国" },
+            limit: { type: "number", description: "默认 5，最大 20" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "preview_transport_modes",
+        description: "只读比较两个地点之间的交通方式，不保存路线；适合用户只想查怎么走、哪种更快或更短时使用。",
+        parameters: {
+          type: "object",
+          required: ["fromQuery", "toQuery"],
+          properties: {
+            fromQuery: { type: "string", description: "起点关键词" },
+            fromPoiName: { type: "string", description: "期望选择的起点 POI 名称；为空时使用第一个候选" },
+            toQuery: { type: "string", description: "终点关键词" },
+            toPoiName: { type: "string", description: "期望选择的终点 POI 名称；为空时使用第一个候选" },
+            modes: {
+              type: "array",
+              items: { type: "string", enum: ["walking", "transit", "driving", "cycling"] },
+              description: "候选交通方式；未传时默认四种都比"
+            },
+            strategy: { type: "string", enum: ["fastest", "shortest"], description: "返回结果排序方式，默认 fastest" }
+          }
+        }
+      }
+    },
+    {
+      type: "function",
+      function: {
+        name: "get_day_weather",
+        description: "只读获取某个城市某天的天气，不写入行程。",
+        parameters: {
+          type: "object",
+          required: ["city", "date"],
+          properties: {
+            city: { type: "string" },
+            date: { type: "string", description: "YYYY-MM-DD" }
+          }
         }
       }
     }
@@ -1525,6 +1802,11 @@ function asOptionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function clampPositiveInt(value: number | undefined, fallback: number, max: number): number {
+  if (!Number.isInteger(value) || value === undefined || value <= 0) return fallback;
+  return Math.min(value, max);
+}
+
 function asStringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -1536,14 +1818,12 @@ function parseItineraryDetailChanges(parsed: Record<string, unknown>): Itinerary
   const endDate = asOptionalString(parsed.endDate);
   const notes = asOptionalString(parsed.notes);
   const budgetCny = asOptionalNumber(parsed.budgetCny);
-  const preferences = asStringList(parsed.preferences);
   const companions = asStringList(parsed.companions);
   if (destination) changes.destination = destination;
   if (startDate) changes.startDate = startDate;
   if (endDate) changes.endDate = endDate;
   if (budgetCny !== undefined) changes.budgetCny = budgetCny;
   if (notes) changes.notes = notes;
-  if (preferences.length > 0) changes.preferences = preferences;
   if (companions.length > 0) changes.companions = companions;
   return changes;
 }
@@ -1555,9 +1835,8 @@ function parseDeterministicItineraryDetails(
 ): ItineraryDetailChanges {
   const changes: ItineraryDetailChanges = {};
   const baseYear = Number(itinerary.startDate.slice(0, 4));
-  const destination = extractDetailText(message, ["目的地", "城市"]);
+  const destination = extractDetailText(message, ["出发点", "起点", "目的地", "城市"]);
   const companions = parseDetailList(extractDetailText(message, ["同行人", "同行", "同伴", "出行人", "旅伴"]));
-  const preferences = parseDetailList(extractDetailText(message, ["旅行偏好", "偏好", "喜好", "风格"]));
   const endDate = parseDetailDate(message, ["返回", "结束", "返程"], baseYear);
   const startDate = parseDetailDate(message, ["出发", "开始"], baseYear);
   const budgetMatch = options.activityScoped
@@ -1568,7 +1847,6 @@ function parseDeterministicItineraryDetails(
     : message.match(/备注[:：]?\s*([^。]+。?)/);
   if (destination) changes.destination = destination;
   if (companions.length > 0) changes.companions = companions;
-  if (preferences.length > 0) changes.preferences = preferences;
   if (startDate) changes.startDate = startDate;
   if (endDate) changes.endDate = endDate;
   if (budgetMatch?.[1]) changes.budgetCny = Number(budgetMatch[1]);
@@ -2031,6 +2309,7 @@ function hasExplicitActivityCreationIntent(message: string): boolean {
 
 function toolAgent(toolName: string): AgentName {
   if (toolName.includes("skill")) return "StyleAgent";
+  if (toolName.includes("weather")) return "WeatherAgent";
   if (toolName.includes("transport") || toolName.includes("route")) return "TransportAgent";
   if (toolName.includes("place") || toolName.includes("poi")) return "AttractionAgent";
   if (toolName.includes("timing") || toolName.includes("conflict")) return "PlannerAgent";
@@ -2055,6 +2334,38 @@ function routePoint(activity: Activity): string | undefined {
     return `${activity.place.coordinates.lng},${activity.place.coordinates.lat}`;
   }
   return activity.placeName?.trim() || activity.place?.name?.trim() || activity.title.trim() || undefined;
+}
+
+function getRoutePairsForDay(
+  itinerary: TravelItinerary,
+  day: ItineraryDay
+): Array<{ fromActivity: Activity; toActivity: Activity; exists: boolean }> {
+  const pairs: Array<{ fromActivity: Activity; toActivity: Activity; exists: boolean }> = [];
+  const dayIndex = itinerary.days.findIndex((candidate) => candidate.id === day.id);
+  const previousDay = dayIndex > 0 ? itinerary.days[dayIndex - 1] : undefined;
+  const overnightStart = previousDay?.activities.at(-1);
+  const firstActivity = day.activities[0];
+  if (overnightStart && firstActivity && canRouteActivityPair(overnightStart, firstActivity)) {
+    pairs.push({
+      fromActivity: overnightStart,
+      toActivity: firstActivity,
+      exists: hasTransportLeg(day, overnightStart.id, firstActivity.id)
+    });
+  }
+  day.activities.forEach((activity, index) => {
+    const next = day.activities[index + 1];
+    if (!next || !canRouteActivityPair(activity, next)) return;
+    pairs.push({
+      fromActivity: activity,
+      toActivity: next,
+      exists: hasTransportLeg(day, activity.id, next.id)
+    });
+  });
+  return pairs;
+}
+
+function hasTransportLeg(day: ItineraryDay, fromActivityId: string, toActivityId: string): boolean {
+  return (day.transportLegs ?? []).some((leg) => leg.fromActivityId === fromActivityId && leg.toActivityId === toActivityId);
 }
 
 function canRouteActivityPair(from: Activity, to: Activity): boolean {
@@ -2141,35 +2452,19 @@ function summarizeSession(
   message: string,
   itinerary: TravelItinerary,
   skillNames: string[],
-  previousSessions: AgentSession[] = []
+  memorySnapshotText: string
 ): string {
-  const latestHistory = previousSessions.find((session) => session.contextSummary || session.userPreferenceSummary);
   return [
     `用户请求：${message}`,
-    `当前行程：${itinerary.title}，${itinerary.destination}，${itinerary.days.length} 天`,
+    `当前行程：${itinerary.title}，出发点 ${itinerary.destination}，${itinerary.days.length} 天`,
     skillNames.length ? `已融合 Skill：${skillNames.join("、")}` : "未导入 Skill",
-    latestHistory
-      ? `历史参考：${latestHistory.userPreferenceSummary ?? latestHistory.contextSummary}`
-      : undefined
+    memorySnapshotText !== "暂无已保存记忆" ? `已注入记忆：${memorySnapshotText}` : undefined
   ]
     .filter(Boolean)
     .join("；");
 }
 
-function inferPreferenceSummary(
-  preferences: string[],
-  skillNames: string[],
-  previousSessions: AgentSession[] = [],
-  message = ""
-): string {
-  const previousTokens = previousSessions.flatMap((session) =>
-    splitPreferenceText([session.userPreferenceSummary, session.contextSummary].filter(Boolean).join("、"))
-  );
-  const messageTokens = splitPreferenceText(message);
-  return unique([...preferences, ...skillNames, ...previousTokens, ...messageTokens]).join("、") || "暂无稳定偏好";
-}
-
-function extractConversationPreferences(message: string): string[] {
+function extractConversationMemories(message: string): string[] {
   if (isPreferenceRemovalRequest(message)) return [];
   const explicit = parseDetailList(extractDetailText(message, ["旅行偏好", "偏好", "喜好", "风格"]));
   const hasPreferenceCue = /(偏好|喜好|喜欢|不喜欢|讨厌|希望|以后|后续|下次|每次|总是|优先|尽量|避免|避开|不要|少一点|多一点)/.test(message);
@@ -2218,54 +2513,92 @@ function extractConversationPreferences(message: string): string[] {
 }
 
 function isPreferenceRemovalRequest(message: string): boolean {
-  return /(删除|移除|清除|去掉|取消).{0,8}(偏好|喜好|风格)/.test(message);
-}
-
-function splitPreferenceText(text: string): string[] {
-  const known = [
-    "慢节奏",
-    "咖啡",
-    "citywalk",
-    "亲子",
-    "儿童友好",
-    "博物馆",
-    "园林",
-    "海边",
-    "日落",
-    "小店",
-    "雨天",
-    "室内",
-    "夜景",
-    "不赶路",
-    "少走路",
-    "少排队",
-    "预算敏感",
-    "拍照",
-    "购物",
-    "避开人多"
-  ];
-  return known.filter((token) => text.includes(token));
+  return /(删除|移除|清除|去掉|取消).{0,8}(偏好|喜好|风格|记忆)/.test(message);
 }
 
 function unique(values: string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
-type DeepSeekChatResponse = {
-  choices?: Array<{
-    message?: {
-      role?: string;
-      content?: string;
-      tool_calls?: Array<{
-        id: string;
-        type: "function";
-        function: {
-          name: string;
-          arguments: string;
-        };
-      }>;
-    };
-  }>;
+function readAgentMaxTurns(): number {
+  const configured = Number(process.env.AGENT_MAX_TURNS);
+  if (Number.isInteger(configured) && configured > 0) return Math.min(configured, 50);
+  return 12;
+}
+
+function summarizeToolInput(toolName: string, parsed: Record<string, unknown>): string {
+  if (toolName === "add_place_activity") return `搜索并加入 ${String(parsed.poiName ?? parsed.query ?? parsed.title ?? "地点")}`;
+  if (toolName === "search_poi") return `只读搜索 ${String(parsed.query ?? "地点")}`;
+  if (toolName === "preview_transport_modes") {
+    return `只读比较 ${String(parsed.fromQuery ?? parsed.from ?? "起点")} 到 ${String(parsed.toQuery ?? parsed.to ?? "终点")}`;
+  }
+  if (toolName === "get_day_weather") return `只读查询 ${String(parsed.city ?? "城市")} ${String(parsed.date ?? "日期")} 的天气`;
+  if (toolName === "add_activity") return `新增 ${String(parsed.title ?? "活动")}`;
+  if (toolName === "complete_transport_legs") return `补全交通路线：${String(parsed.mode ?? "walking")}`;
+  if (toolName.includes("transport")) return "处理交通路线";
+  if (toolName.includes("activity")) return "处理活动";
+  return "执行模型工具调用";
+}
+
+function summarizePoiCandidate(poi: PoiResult): Record<string, unknown> {
+  return {
+    id: poi.id,
+    name: poi.name,
+    address: poi.address,
+    city: poi.city,
+    district: poi.district,
+    type: poi.type,
+    openingHours: poi.openingHours,
+    averageCostCny: poi.averageCostCny
+  };
+}
+
+function compactTechnicalValue(value: unknown): unknown {
+  let json = "";
+  try {
+    json = JSON.stringify(value);
+  } catch {
+    return String(value).slice(0, 1200);
+  }
+  if (!json || json.length <= 1200) return value;
+  return `${json.slice(0, 1200)}...`;
+}
+
+function summarizeItineraryForToolObservation(itinerary: TravelItinerary) {
+  return {
+    title: itinerary.title,
+    destination: itinerary.destination,
+    days: itinerary.days.map((day) => ({
+      title: day.title,
+      activities: day.activities.map((activity) => ({
+        id: activity.id,
+        title: activityDisplayName(activity),
+        placeName: activity.placeName ?? activity.place?.name,
+        startTime: activity.startTime,
+        endTime: activity.endTime
+      })),
+      transportLegCount: day.transportLegs.length
+    }))
+  };
+}
+
+type ChatCompletionExecutionState = {
+  itinerary: TravelItinerary;
+  importedSkillIds: string[];
+  traces: AgentTraceEvent[];
+  sessionId: string;
+  diff: string[];
+  addedStructuredActivity: boolean;
+  usedTransportTool: boolean;
+  completeTransportMode?: MapRouteMode;
+};
+
+type ChatCompletionToolExecutionResult = {
+  status: "completed" | "failed";
+  title: string;
+  summary: string;
+  diff: string[];
+  output: unknown;
 };
 
 type TransportToolRequest = {
@@ -2320,5 +2653,5 @@ type PlaceUpdateToolRequest = {
 };
 
 type ItineraryDetailChanges = Partial<
-  Pick<TravelItinerary, "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "preferences" | "companions">
+  Pick<TravelItinerary, "destination" | "startDate" | "endDate" | "budgetCny" | "notes" | "companions">
 >;

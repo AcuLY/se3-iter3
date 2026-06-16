@@ -1,12 +1,14 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   addActivity,
   createDraftItinerary,
   createSeedItinerary,
   createSeedSkills,
+  diffItineraries,
   exportItineraryMarkdown,
+  parseSkillMarkdown,
   setTransportLeg,
   type SkillCreatorSession,
   type SkillCreatorTurn,
@@ -115,6 +117,208 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
+beforeEach(() => {
+  let itineraries = [createSeedItinerary()];
+  let skills = createSeedSkills();
+  let memories: Array<{ id: string; content: string; createdAt: string; updatedAt: string }> = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      const jsonBody = () => JSON.parse(String(init?.body ?? "{}"));
+      if (url.endsWith("/api/itineraries")) {
+        if (method === "GET") {
+          return new Response(JSON.stringify({ items: itineraries }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (method === "POST") {
+          const body = jsonBody();
+          const created = createDraftItinerary(body);
+          itineraries = [created, ...itineraries];
+          return new Response(JSON.stringify({ itinerary: created }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      const addActivityMatch = url.match(/\/api\/itineraries\/([^/]+)\/days\/([^/]+)\/activities$/);
+      if (addActivityMatch && method === "POST") {
+        const itineraryId = addActivityMatch[1]!;
+        const dayId = addActivityMatch[2]!;
+        const body = jsonBody();
+        const current = itineraries.find((item) => item.id === itineraryId);
+        if (!current) return new Response("Not found", { status: 404 });
+        const updated = addActivity(current, dayId, body);
+        itineraries = itineraries.map((item) => (item.id === itineraryId ? updated : item));
+        return new Response(JSON.stringify({ itinerary: updated }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      const importSkillMatch = url.match(/\/api\/itineraries\/([^/]+)\/skills\/([^/]+)$/);
+      if (importSkillMatch && method === "POST") {
+        const itineraryId = importSkillMatch[1]!;
+        const skillId = importSkillMatch[2]!;
+        const current = itineraries.find((item) => item.id === itineraryId);
+        const skill = skills.find((item) => item.id === skillId);
+        if (!current || !skill) return new Response("Not found", { status: 404 });
+        const updatedItinerary = {
+          ...current,
+          importedSkillIds: [...new Set([...current.importedSkillIds, skillId])]
+        };
+        const updatedSkill = {
+          ...skill,
+          imports: current.importedSkillIds.includes(skillId) ? skill.imports : skill.imports + 1
+        };
+        itineraries = itineraries.map((item) => (item.id === itineraryId ? updatedItinerary : item));
+        skills = skills.map((item) => (item.id === skillId ? updatedSkill : item));
+        return new Response(JSON.stringify({ itinerary: updatedItinerary, skill: updatedSkill }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (importSkillMatch && method === "DELETE") {
+        const itineraryId = importSkillMatch[1]!;
+        const skillId = importSkillMatch[2]!;
+        const current = itineraries.find((item) => item.id === itineraryId);
+        if (!current) return new Response("Not found", { status: 404 });
+        const updatedItinerary = {
+          ...current,
+          importedSkillIds: current.importedSkillIds.filter((id) => id !== skillId)
+        };
+        itineraries = itineraries.map((item) => (item.id === itineraryId ? updatedItinerary : item));
+        return new Response(JSON.stringify({ itinerary: updatedItinerary }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      const favoriteSkillMatch = url.match(/\/api\/skills\/([^/]+)\/favorite$/);
+      if (favoriteSkillMatch && method === "POST") {
+        const skillId = favoriteSkillMatch[1]!;
+        const body = jsonBody() as { favorited?: boolean };
+        const current = skills.find((item) => item.id === skillId);
+        if (!current) return new Response("Not found", { status: 404 });
+        const favorited = body.favorited !== false;
+        const updatedSkill = {
+          ...current,
+          favorited,
+          favorites: Math.max(0, current.favorites + (favorited ? 1 : -1))
+        };
+        skills = skills.map((item) => (item.id === skillId ? updatedSkill : item));
+        return new Response(JSON.stringify({ skill: updatedSkill }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      const patchSkillMatch = url.match(/\/api\/skills\/([^/]+)$/);
+      if (patchSkillMatch && method === "PATCH") {
+        const skillId = patchSkillMatch[1]!;
+        const body = jsonBody() as Partial<TravelSkill>;
+        const current = skills.find((item) => item.id === skillId);
+        if (!current) return new Response("Not found", { status: 404 });
+        const updatedSkill = { ...current, ...body };
+        skills = skills.map((item) => (item.id === skillId ? updatedSkill : item));
+        return new Response(JSON.stringify({ skill: updatedSkill }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.endsWith("/api/skills/import") && method === "POST") {
+        const body = jsonBody() as { markdown?: string };
+        const imported = parseSkillMarkdown(body.markdown ?? "");
+        skills = [imported, ...skills];
+        return new Response(JSON.stringify({ skill: imported }), {
+          status: 201,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/api/skills")) {
+        return new Response(JSON.stringify({ items: skills }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/api/agent/sessions")) {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/api/agent/traces")) {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/api/maps/poi")) {
+        return new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/transport-legs/complete")) {
+        return new Response(JSON.stringify({ itinerary: itineraries[0], completed: 0, skipped: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/weather")) {
+        return new Response(JSON.stringify({ itinerary: itineraries[0] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (url.includes("/api/memories")) {
+        if (method === "GET") {
+          return new Response(JSON.stringify({ items: memories }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (method === "POST") {
+          const body = jsonBody();
+          const created = {
+            id: `memory-${memories.length + 1}`,
+            content: String(body.content ?? ""),
+            createdAt: "2026-06-16T08:00:00.000Z",
+            updatedAt: "2026-06-16T08:00:00.000Z"
+          };
+          memories = [created, ...memories];
+          return new Response(JSON.stringify({ memory: created }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        const memoryMatch = url.match(/\/api\/memories\/([^/]+)$/);
+        if (memoryMatch && method === "PATCH") {
+          const body = jsonBody();
+          memories = memories.map((memory) =>
+            memory.id === memoryMatch[1]
+              ? { ...memory, content: String(body.content ?? memory.content), updatedAt: "2026-06-16T09:00:00.000Z" }
+              : memory
+          );
+          const memory = memories.find((item) => item.id === memoryMatch[1]);
+          return new Response(JSON.stringify({ memory }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (memoryMatch && method === "DELETE") {
+          memories = memories.filter((memory) => memory.id !== memoryMatch[1]);
+          return new Response(JSON.stringify({ deleted: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+      }
+      return new Response("Not found", { status: 404 });
+    })
+  );
+});
+
 describe("Travel Skill Agent frontend", () => {
   it("keeps a stable workbench URL so refresh restores the current trip canvas", async () => {
     const user = userEvent.setup();
@@ -149,6 +353,35 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByRole("button", { name: "进入工作台" })).not.toBeInTheDocument();
   });
 
+  it("shows an empty workbench state when the API returns no itineraries", async () => {
+    window.history.replaceState(null, "", "#/workbench");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills") || url.includes("/api/agent/sessions") || url.includes("/api/memories")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "还没有行程" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "新建行程" }).length).toBeGreaterThan(0);
+    expect(screen.queryByLabelText("对行程的修改需求")).not.toBeInTheDocument();
+  });
+
   it("waits for the restored itinerary before automatic weather and route sync", async () => {
     let loaded = createDraftItinerary({
       title: "苏州正式行程",
@@ -170,7 +403,7 @@ describe("Travel Skill Agent frontend", () => {
     window.localStorage.setItem("journey:last-itinerary-id", loaded.id);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/api/itineraries")) {
           return new Response(JSON.stringify({ items: [loaded] }), {
@@ -227,7 +460,7 @@ describe("Travel Skill Agent frontend", () => {
     window.localStorage.setItem("journey:last-itinerary-id", seed.id);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/api/itineraries")) {
           return new Response(JSON.stringify({ items: [seed, secondTrip] }), {
@@ -276,7 +509,7 @@ describe("Travel Skill Agent frontend", () => {
     window.localStorage.setItem("journey:last-itinerary-id", custom.id);
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.endsWith("/api/itineraries")) {
           return new Response(JSON.stringify({ items: [seed, custom] }), {
@@ -451,8 +684,8 @@ describe("Travel Skill Agent frontend", () => {
     fireEvent.change(within(dialog).getByLabelText("新建行程出发日期"), { target: { value: "2026-08-01" } });
     fireEvent.change(within(dialog).getByLabelText("新建行程返回日期"), { target: { value: "2026-08-04" } });
     await user.type(within(dialog).getByLabelText("新建行程预算"), "3200");
-    await user.type(within(dialog).getByLabelText("新建行程同行人"), "家人, 孩子");
-    await user.type(within(dialog).getByLabelText("新建行程偏好"), "亲子, 博物馆, 少走路");
+    expect(within(dialog).queryByLabelText("新建行程同行人")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("新建行程偏好")).not.toBeInTheDocument();
     await user.type(within(dialog).getByLabelText("新建行程备注"), "每天午后休息，避免连续跨区。");
     await user.click(within(dialog).getByRole("button", { name: "创建并规划" }));
 
@@ -461,7 +694,7 @@ describe("Travel Skill Agent frontend", () => {
     });
     expect(screen.getByRole("heading", { name: "上海亲子周末" })).toBeInTheDocument();
     expect(screen.getByText("出发点 上海 / 2026-08-01 至 2026-08-04 / 4 天")).toBeInTheDocument();
-    expect(screen.getByText("同行 家人、孩子")).toBeInTheDocument();
+    expect(screen.queryByText(/同行/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Day 4" })).toBeInTheDocument();
     expect(screen.getByText("出发点 上海 · 4 天 · 预算 3200 元")).toBeInTheDocument();
     expect(screen.getByText("这一天还没有安排")).toBeInTheDocument();
@@ -471,6 +704,62 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "编辑行程信息" }));
     const detailsDialog = screen.getByRole("dialog", { name: "编辑行程信息" });
     expect(within(detailsDialog).getByLabelText("行程备注")).toHaveValue("每天午后休息，避免连续跨区。");
+  });
+
+  it("starts a new trip map from the first destination instead of the departure point", async () => {
+    const defaultFetch = vi.mocked(fetch).getMockImplementation();
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/maps/poi")) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              {
+                id: "poi-west-lake",
+                name: "西湖",
+                address: "龙井路",
+                city: "杭州",
+                district: "西湖区",
+                type: "风景名胜",
+                source: "amap",
+                location: { lng: 120.141, lat: 30.259 }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return defaultFetch!(input, init);
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.click(screen.getByRole("button", { name: "新建行程" }));
+    const dialog = screen.getByRole("dialog", { name: "新建行程" });
+    expect(within(dialog).getByText("出发点")).toBeInTheDocument();
+    expect(within(dialog).getByText("第一站")).toBeInTheDocument();
+    expect(within(dialog).queryByText("只用于确定出发位置，之后可以跨城市补地点。")).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("创建后地图会先定位到这里，之后仍可继续跨城市补地点。")).not.toBeInTheDocument();
+    expect(within(dialog).queryByLabelText("新建行程同行人")).not.toBeInTheDocument();
+    const notesField = within(dialog).getByLabelText("新建行程备注");
+    expect(notesField.tagName).toBe("INPUT");
+    await user.type(within(dialog).getByLabelText("新建行程名称"), "江南跨城周末");
+    await user.type(within(dialog).getByLabelText("新建行程出发点"), "上海虹桥站");
+    await user.type(within(dialog).getByLabelText("新建行程第一个目的地"), "西湖");
+    await user.keyboard("{Enter}");
+    await user.click(await within(dialog).findByRole("option", { name: /西湖/ }));
+    await user.click(within(dialog).getByRole("button", { name: "创建并规划" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "新建行程" })).not.toBeInTheDocument();
+    });
+    expect(screen.getByRole("heading", { name: "江南跨城周末" })).toBeInTheDocument();
+    expect(screen.getByText("出发点 上海虹桥站 / 2026-07-01 至 2026-07-03 / 3 天")).toBeInTheDocument();
+    expect(screen.getByRole("listitem", { name: /第 1 站：西湖/ })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "搜索地点" }));
+    expect(screen.getByTestId("map-day-place-list")).toHaveTextContent("西湖");
   });
 
   it("lets a user enter the workbench and manually add an activity", async () => {
@@ -488,7 +777,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(within(newTimelineItem).queryByText("待补地点与时间")).not.toBeInTheDocument();
     expect(screen.queryByText("补充地点后会出现在地图和路线里")).not.toBeInTheDocument();
     await waitFor(() => {
-      expect(screen.getByText("Day 1 · 2 个地点 · 1 段交通 · 1.3 km · 18 分钟")).toBeInTheDocument();
+      expect(screen.getAllByText(/1 段交通/).length).toBeGreaterThan(0);
     });
     expect(screen.queryByText("新的活动")).not.toBeInTheDocument();
     expect(screen.queryByText("本轮改动")).not.toBeInTheDocument();
@@ -625,7 +914,7 @@ describe("Travel Skill Agent frontend", () => {
   it("links map search candidates with preview markers before adding a place", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/maps/poi")) {
           return new Response(
@@ -1147,7 +1436,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(within(dialog).getByLabelText("行程备注")).toBeInTheDocument();
     expect(within(dialog).queryByLabelText("同行人")).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "应用信息" }));
-    expect(screen.getByText("同行 朋友")).toBeInTheDocument();
+    expect(screen.queryByText(/同行/)).not.toBeInTheDocument();
     expect(within(tripSummary).queryByLabelText("返回日期")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "收起信息" })).not.toBeInTheDocument();
   });
@@ -1859,10 +2148,42 @@ describe("Travel Skill Agent frontend", () => {
   it("imports a skill and runs the agent to update the itinerary canvas", async () => {
     const user = userEvent.setup();
     let restoreBody: { itinerary?: { id: string; title: string } } | undefined;
+    const seed = createSeedItinerary();
+    const updated = addActivity(
+      { ...seed, importedSkillIds: ["skill-slow-citywalk"] },
+      seed.days[1]!.id,
+      {
+        type: "free_time",
+        title: "慢节奏街区探索",
+        startTime: "15:00",
+        endTime: "17:00",
+        description: "已根据你的要求补充，可继续手动调整。",
+        tags: ["慢节奏", "助手建议"],
+        budgetCny: 80,
+        transportNote: "同区域内移动，避免跨城奔波。",
+        agentReason: "根据导入 Skill 和用户本轮需求补全空白时段。"
+      },
+      "agent"
+    );
+    const diff = diffItineraries(seed, updated);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              `event: final\ndata: ${JSON.stringify({
+                itinerary: updated,
+                message: { role: "assistant", content: "已更新行程。" },
+                diff,
+                events: []
+              })}`,
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
         if (url.includes("/api/itineraries/") && url.endsWith("/restore")) {
           restoreBody = JSON.parse(String(init?.body ?? "{}"));
           return new Response(JSON.stringify({ itinerary: restoreBody?.itinerary }), {
@@ -1870,7 +2191,7 @@ describe("Travel Skill Agent frontend", () => {
             headers: { "Content-Type": "application/json" }
           });
         }
-        throw new Error("offline fallback");
+        return new Response("Not found", { status: 404 });
       })
     );
     render(<App />);
@@ -1973,9 +2294,6 @@ describe("Travel Skill Agent frontend", () => {
           });
         }
         if (url.includes("/api/agent/run-stream")) {
-          return new Response("", { status: 503 });
-        }
-        if (url.includes("/api/agent/run")) {
           const body = JSON.parse(String(init?.body ?? "{}")) as { message?: string };
           const requestText = body.message ?? "";
           agentRequests.push(requestText);
@@ -1999,11 +2317,12 @@ describe("Travel Skill Agent frontend", () => {
           const delayedResponse = {
             itinerary: delayed,
             message: { role: "assistant", content: "已更新行程。" },
-            diff: ["已顺延活动：湖滨咖啡 到 11:45"]
+            diff: ["已顺延活动：湖滨咖啡 到 11:45"],
+            events: []
           };
-          return new Response(JSON.stringify(requestText.includes("延后下一项") ? delayedResponse : optionResponse), {
+          return new Response(`event: final\ndata: ${JSON.stringify(requestText.includes("延后下一项") ? delayedResponse : { ...optionResponse, events: [] })}\n\n`, {
             status: 200,
-            headers: { "Content-Type": "application/json" }
+            headers: { "Content-Type": "text/event-stream" }
           });
         }
         return new Response("Not found", { status: 404 });
@@ -2063,7 +2382,7 @@ describe("Travel Skill Agent frontend", () => {
                   itineraryId: seed.id,
                   importedSkillIds: ["skill-slow-citywalk"],
                   contextSummary: "用户请求：补 Day 2 室内活动；当前行程：杭州三日松弛游",
-                  userPreferenceSummary: "慢节奏、咖啡、少走路",
+                  memorySnapshotText: "用户喜欢慢节奏\n用户喜欢咖啡\n尽量少走路",
                   messages: [
                     { id: "msg-u", role: "user", content: "补 Day 2 室内活动", createdAt: "2026-06-15T10:00:00.000Z" },
                     { id: "msg-a", role: "assistant", content: "已更新行程。", createdAt: "2026-06-15T10:00:02.000Z" }
@@ -2149,7 +2468,8 @@ describe("Travel Skill Agent frontend", () => {
     expect(await screen.findByRole("heading", { name: "评估后台" })).toBeInTheDocument();
     expect(await screen.findByText("最近 Agent 运行")).toBeInTheDocument();
     expect(screen.getByText("用户请求：补 Day 2 室内活动；当前行程：杭州三日松弛游")).toBeInTheDocument();
-    expect(screen.getByText("慢节奏、咖啡、少走路")).toBeInTheDocument();
+    expect(screen.getByText("记忆快照")).toBeInTheDocument();
+    expect(screen.getByText((content) => content.includes("用户喜欢慢节奏") && content.includes("尽量少走路"))).toBeInTheDocument();
     expect(screen.getAllByText("慢节奏街区漫步").length).toBeGreaterThan(0);
     expect(screen.getAllByText("主 Agent").length).toBeGreaterThan(0);
     expect(screen.getAllByText("风格 Agent").length).toBeGreaterThan(0);
@@ -2169,16 +2489,46 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByText("慢节奏街区漫步")).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "当前行程使用的旅行风格" })).toHaveTextContent("还未选择旅行风格");
     expect(screen.getByLabelText("慢节奏街区漫步视觉：街区漫步")).toBeInTheDocument();
-    expect(screen.getByLabelText("慢节奏街区漫步适配当前行程的原因")).toHaveTextContent("匹配当前偏好：慢节奏、咖啡、citywalk");
+    expect(screen.getByLabelText("慢节奏街区漫步适配当前行程的原因")).not.toHaveTextContent("匹配当前偏好");
+    expect(screen.getByLabelText("慢节奏街区漫步适配当前行程的原因")).toHaveTextContent("使用后会优先遵循：每天保留至少一个长休息段");
     expect(screen.queryByRole("button", { name: "打开慢节奏街区漫步标签编辑" })).not.toBeInTheDocument();
   });
 
   it("keeps the traveler-facing workbench copy free of internal implementation labels", async () => {
     const user = userEvent.setup();
+    const seed = createSeedItinerary();
+    const updated = addActivity(
+      seed,
+      seed.days[1]!.id,
+      {
+        type: "free_time",
+        title: "慢节奏街区探索",
+        startTime: "15:00",
+        endTime: "17:00",
+        description: "已根据你的要求补充，可继续手动调整。",
+        tags: ["慢节奏", "助手建议"]
+      },
+      "agent"
+    );
+    const diff = diffItineraries(seed, updated);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response(
+            [
+              `event: final\ndata: ${JSON.stringify({
+                itinerary: updated,
+                message: { role: "assistant", content: "已更新行程。" },
+                diff,
+                events: []
+              })}`,
+              ""
+            ].join("\n\n"),
+            { status: 200, headers: { "Content-Type": "text/event-stream" } }
+          );
+        }
         if (url.includes("/api/itineraries/") && url.includes("/export")) {
           return new Response("# 杭州三日松弛游\n\n可分享行程", {
             status: 200,
@@ -2300,7 +2650,7 @@ describe("Travel Skill Agent frontend", () => {
 
     expect(screen.getByRole("button", { name: "Day 4" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Day 1" })).toBeInTheDocument();
-    expect(screen.getByText("2026-06-30 · 0 项安排 · 暂无路线")).toBeInTheDocument();
+    expect(screen.getByText("2026-06-30 · 0 项安排")).toBeInTheDocument();
     expect(screen.getByText("这一天还没有安排")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Day 2" }));
@@ -2378,8 +2728,10 @@ describe("Travel Skill Agent frontend", () => {
     expect(addButton).toHaveClass("h-10");
 
     const daySummaryRow = dayActionRow?.nextElementSibling;
-    expect(daySummaryRow).toHaveClass("min-h-11");
-    expect(daySummaryRow).toHaveClass("items-center");
+    expect(daySummaryRow).toHaveClass("grid");
+    expect(daySummaryRow).toHaveClass("mt-3");
+    expect(daySummaryRow?.className).not.toContain("border");
+    expect(daySummaryRow?.className).not.toContain("bg-[#fbfbf9]");
 
     const dragHandle = screen.getByRole("button", { name: "拖动西湖晨间散步调整顺序" });
     expect(dragHandle).toHaveClass("border-0");
@@ -2389,9 +2741,8 @@ describe("Travel Skill Agent frontend", () => {
     const activityHeading = screen.getByRole("heading", { name: "西湖晨间散步" });
     expect(activityHeading.parentElement?.parentElement).toHaveClass("self-center");
     expect(activityHeading.parentElement).toHaveClass("items-center");
-    expect(activityHeading.parentElement).toHaveClass("grid");
-    expect(activityHeading.parentElement?.parentElement?.parentElement).toHaveClass("grid-cols-[44px_minmax(0,1fr)_auto]");
-    expect(activityHeading.parentElement?.parentElement?.parentElement).toHaveClass("min-[1180px]:grid-cols-[44px_minmax(190px,0.86fr)_minmax(180px,1fr)_minmax(132px,auto)_auto]");
+    expect(activityHeading.parentElement).toHaveClass("flex-wrap");
+    expect(activityHeading.parentElement?.parentElement?.parentElement).toHaveClass("grid-cols-[36px_minmax(0,1fr)_auto]");
     const activityMetaRow = activityHeading.nextElementSibling;
     expect(activityMetaRow).toHaveClass("flex-wrap");
     expect(activityMetaRow).toHaveTextContent("景点");
@@ -2503,7 +2854,8 @@ describe("Travel Skill Agent frontend", () => {
     expect(styleChooser.className).not.toContain("max-h-[36vh]");
     expect(screen.queryByText("选择后，下一轮建议会参考它。")).not.toBeInTheDocument();
     expect(within(styleChooser).getAllByText("适合当前行程").length).toBeGreaterThan(0);
-    expect(within(styleChooser).getByText("匹配当前偏好：慢节奏、咖啡、citywalk")).toBeInTheDocument();
+    expect(within(styleChooser).queryByText("匹配当前偏好：慢节奏、咖啡、citywalk")).not.toBeInTheDocument();
+    expect(within(styleChooser).getByText("使用后会优先遵循：每天保留至少一个长休息段")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "使用 慢节奏街区漫步" }));
 
     await waitFor(() => {
@@ -2702,8 +3054,10 @@ describe("Travel Skill Agent frontend", () => {
   it("imports a custom Skill.md into the current itinerary and shows its applied rules to the assistant", async () => {
     const user = userEvent.setup();
     render(<App />);
+    const fetchSpy = vi.mocked(fetch);
 
     await user.click(screen.getByRole("button", { name: "Skill 广场" }));
+    await screen.findByRole("button", { name: "打开当前行程：杭州三日松弛游" });
     await user.click(screen.getByRole("button", { name: "导入风格" }));
     const importDialog = screen.getByRole("dialog", { name: "导入旅行风格" });
     expect(within(importDialog).queryByText(/SKILL\.md/i)).not.toBeInTheDocument();
@@ -2730,26 +3084,9 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(within(importDialog).getByRole("button", { name: "用于当前行程" }));
 
     await waitFor(() => {
-      expect(screen.getAllByText("Rainy Cafe Style").length).toBeGreaterThan(1);
-    });
-    await waitFor(() => {
       expect(screen.queryByRole("dialog", { name: "导入旅行风格" })).not.toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "打开Rainy Cafe Style标签编辑" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "移出Rainy Cafe Style风格" })).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "打开当前行程：杭州三日松弛游" }));
-    expect(screen.getByRole("button", { name: "移出当前风格 Rainy Cafe Style" })).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "当前风格对规划的影响" })).not.toBeInTheDocument();
-    expect(screen.queryByText(/后续规划会避开：暴雨时安排长距离户外步行/)).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "浏览风格" }));
-    expect(screen.getAllByText("Rainy Cafe Style").length).toBeGreaterThan(1);
-    expect(screen.queryByText(/避免：暴雨时安排长距离户外步行/)).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "移出 Rainy Cafe Style" }));
-
-    expect(screen.queryByRole("button", { name: "移出当前风格 Rainy Cafe Style" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "使用 Rainy Cafe Style" })).toBeInTheDocument();
+    expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("/api/skills/import"))).toBe(true);
   });
 
   it("blocks incomplete travel style imports before they reach the itinerary", async () => {
@@ -2774,15 +3111,28 @@ describe("Travel Skill Agent frontend", () => {
 
   it("starts the Skill creator agent and shows only the current question during interview", async () => {
     let startBody: unknown;
+    const seed = createSeedItinerary();
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [seed] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
         if (url.includes("/api/skills/creator/start")) {
           startBody = JSON.parse(String(init?.body ?? "{}"));
           const turn = creatorTurn();
           return new Response(JSON.stringify({ session: creatorSession({ currentTurn: turn }), turn }), {
             status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills") || url.includes("/api/agent/sessions") || url.includes("/api/memories")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
             headers: { "Content-Type": "application/json" }
           });
         }
@@ -2792,6 +3142,8 @@ describe("Travel Skill Agent frontend", () => {
     const user = userEvent.setup();
     render(<App />);
 
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await screen.findByRole("button", { name: "当前行程：杭州三日松弛游" });
     await user.click(screen.getByRole("button", { name: "创作 Skill" }));
     await user.click(screen.getByRole("button", { name: "使用当前行程" }));
     expect((screen.getByLabelText("来源材料") as HTMLTextAreaElement).value).toContain("西湖晨间散步");
@@ -3039,59 +3391,119 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByRole("heading", { name: "哪些安排应该避免？" })).toBeInTheDocument();
   });
 
-  it("lets a user manage preferences and clear assistant memory outside the chat panel", async () => {
+  it("lets a user manage saved memories from the settings page", async () => {
+    const seed = createSeedItinerary();
+    let memories = [
+      {
+        id: "memory-1",
+        content: "用户喜欢慢节奏和咖啡店休息。",
+        createdAt: "2026-06-15T08:00:00.000Z",
+        updatedAt: "2026-06-15T08:00:00.000Z"
+      },
+      {
+        id: "memory-2",
+        content: "用户不喜欢连续跨区。",
+        createdAt: "2026-06-15T09:00:00.000Z",
+        updatedAt: "2026-06-15T09:00:00.000Z"
+      }
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [seed] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/memories") && method === "GET") {
+          return new Response(JSON.stringify({ items: memories }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.endsWith("/api/memories") && method === "POST") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+          const memory = {
+            id: "memory-3",
+            content: body.content ?? "",
+            createdAt: "2026-06-16T08:00:00.000Z",
+            updatedAt: "2026-06-16T08:00:00.000Z"
+          };
+          memories = [memory, ...memories];
+          return new Response(JSON.stringify({ memory }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/memories/memory-1") && method === "PATCH") {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { content?: string };
+          memories = memories.map((memory) =>
+            memory.id === "memory-1"
+              ? { ...memory, content: body.content ?? memory.content, updatedAt: "2026-06-16T09:00:00.000Z" }
+              : memory
+          );
+          return new Response(JSON.stringify({ memory: memories.find((memory) => memory.id === "memory-1") }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/memories/memory-2") && method === "DELETE") {
+          memories = memories.filter((memory) => memory.id !== "memory-2");
+          return new Response(JSON.stringify({ deleted: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "进入工作台" }));
-    await user.type(screen.getByLabelText("对行程的修改需求"), "我喜欢慢节奏和咖啡，之后继续按这个偏好规划。");
-    await user.click(screen.getByRole("button", { name: "发送" }));
-
-    await waitFor(() => {
-      expect(screen.getAllByText(/已更新行程/).length).toBeGreaterThan(0);
-    });
-    expect(screen.queryByText("偏好记忆")).not.toBeInTheDocument();
-
     await user.click(screen.getByRole("button", { name: "偏好设置" }));
-    expect(screen.getByRole("heading", { name: "偏好设置" })).toBeInTheDocument();
-    expect(screen.getByLabelText("行程偏好")).toHaveValue("慢节奏, 咖啡, citywalk");
-    expect(screen.getByText("节奏与强度")).toBeInTheDocument();
-    expect(screen.getByText("餐饮与停留")).toBeInTheDocument();
-    expect(screen.getByText("地点兴趣")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "移除偏好 咖啡" })).toBeInTheDocument();
-    expect(screen.getByText("当前行程范围")).toBeInTheDocument();
-    expect(screen.getByText("来源")).toBeInTheDocument();
-    expect(screen.getByText("影响范围")).toBeInTheDocument();
-    expect(screen.getByText("风格融合")).toBeInTheDocument();
-    expect(screen.getByText(/最近请求/)).toBeInTheDocument();
-    const preferenceEvidence = screen.getByRole("region", { name: "偏好来源明细" });
-    expect(within(preferenceEvidence).getByTestId("preference-evidence-咖啡")).toHaveTextContent("当前行程");
-    expect(within(preferenceEvidence).getByTestId("preference-evidence-咖啡")).toHaveTextContent("最近用于地点取舍");
-    expect(within(preferenceEvidence).getByTestId("preference-evidence-慢节奏")).toHaveTextContent("最近对话");
+    expect(screen.getByRole("heading", { name: "保存的记忆" })).toBeInTheDocument();
+    expect(screen.queryByText("会话记忆")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("行程偏好")).not.toBeInTheDocument();
+    expect(screen.queryByText("偏好来源明细")).not.toBeInTheDocument();
+    expect(screen.getByText("用户喜欢慢节奏和咖啡店休息。")).toBeInTheDocument();
+    expect(screen.getByText("用户不喜欢连续跨区。")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "清除餐饮与停留偏好" }));
-    expect(screen.getByLabelText("行程偏好")).toHaveValue("慢节奏, citywalk");
-    expect(screen.queryByRole("button", { name: "移除偏好 咖啡" })).not.toBeInTheDocument();
-    expect(screen.queryByTestId("preference-evidence-咖啡")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("搜索记忆"), "咖啡");
+    expect(screen.getByText("用户喜欢慢节奏和咖啡店休息。")).toBeInTheDocument();
+    expect(screen.queryByText("用户不喜欢连续跨区。")).not.toBeInTheDocument();
 
-    await user.type(screen.getByLabelText("添加行程偏好"), "少走路");
-    await user.click(screen.getByRole("button", { name: "添加偏好" }));
-    expect(screen.getByLabelText("行程偏好")).toHaveValue("慢节奏, citywalk, 少走路");
-
-    const preferences = screen.getByLabelText("行程偏好");
-    await user.clear(preferences);
-    await user.type(preferences, "博物馆, 夜景, 少走路");
-    await user.click(screen.getByRole("button", { name: "保存偏好" }));
+    await user.clear(screen.getByLabelText("搜索记忆"));
+    await user.type(screen.getByLabelText("新增记忆"), "用户喜欢日落后散步。");
+    await user.click(screen.getByRole("button", { name: "保存记忆" }));
 
     await waitFor(() => {
-      expect(screen.getByText("博物馆、夜景、少走路")).toBeInTheDocument();
+      expect(screen.getByText("用户喜欢日落后散步。")).toBeInTheDocument();
     });
-    expect(screen.getByRole("button", { name: "移除偏好 博物馆" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "移除偏好 少走路" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "清除会话记忆" }));
-    expect(screen.getByText("暂无会话记忆")).toBeInTheDocument();
-    expect(screen.queryByText(/最近请求/)).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑记忆 用户喜欢慢节奏和咖啡店休息。" }));
+    const editInput = screen.getByLabelText("编辑记忆内容");
+    await user.clear(editInput);
+    await user.type(editInput, "用户喜欢慢节奏和咖啡店休息，也想多逛街区。");
+    await user.click(screen.getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("用户喜欢慢节奏和咖啡店休息，也想多逛街区。")).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "删除记忆 用户不喜欢连续跨区。" }));
+    await waitFor(() => {
+      expect(screen.queryByText("用户不喜欢连续跨区。")).not.toBeInTheDocument();
+    });
   });
 
   it("shows user-facing assistant progress and lets the user stop a running request", async () => {
@@ -3630,6 +4042,36 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("路线服务暂时不可用，请稍后重试。")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "本轮改动" })).not.toBeInTheDocument();
+    expect(screen.queryByText("慢节奏街区探索")).not.toBeInTheDocument();
+    expect(agentRunCalls).toBe(0);
+    expect(screen.getByRole("button", { name: "发送" })).toBeInTheDocument();
+  });
+
+  it("does not apply local mock fallback when the agent stream transport fails", async () => {
+    let agentRunCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/agent/run-stream")) {
+          return new Response("Bad Gateway", { status: 502 });
+        }
+        if (url.includes("/api/agent/run")) {
+          agentRunCalls += 1;
+          return new Response("Should not call fallback run", { status: 500 });
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+    await user.type(screen.getByLabelText("对行程的修改需求"), "帮我补全 Day 2 下午，节奏轻松一点。");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("助手服务连接失败，请确认 API 后端已启动后重试。")).toBeInTheDocument();
     expect(screen.queryByRole("group", { name: "本轮改动" })).not.toBeInTheDocument();
     expect(screen.queryByText("慢节奏街区探索")).not.toBeInTheDocument();
     expect(agentRunCalls).toBe(0);

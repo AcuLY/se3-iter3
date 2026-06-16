@@ -41,5 +41,7 @@ export const SKILL_CREATOR_AGENT_SYSTEM_PROMPT = [
   "- JSON 必须符合：assistantMessage、question、mode、options、customPlaceholder、progressPercent、draftPatch、done。",
   "- done 为 false 时必须包含 question、mode 和 3 到 5 个 options。",
   "- done 为 true 时不要继续返回 question。",
-  "- options 的 id 使用 lowercase kebab-case。"
+  "- options 必须是对象数组，每个选项都必须包含 id 和 label，例如 {\"id\":\"keep-sunset\",\"label\":\"保留傍晚散步和日落\"}。",
+  "- options 的 id 使用 lowercase kebab-case。",
+  "- 不要用 text、title、name、value 或字符串数组代替 options[].label。"
 ].join("\n");

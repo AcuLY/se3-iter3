@@ -1,55 +1,48 @@
-export async function apiGet<T>(path: string, fallback: T): Promise<T> {
-  try {
-    const response = await fetch(apiUrl(path), { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) return fallback;
-    return (await response.json()) as T;
-  } catch {
-    return fallback;
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly data?: unknown
+  ) {
+    super(message);
+    this.name = "ApiRequestError";
   }
 }
 
-export async function apiPost<T>(path: string, body: unknown, fallback: T): Promise<T> {
-  return apiJson("POST", path, body, fallback);
+export async function apiGet<T>(path: string, ..._unused: unknown[]): Promise<T> {
+  const response = await strictFetch(path, { signal: AbortSignal.timeout(5000) });
+  return (await response.json()) as T;
+}
+
+export async function apiPost<T>(path: string, body: unknown, ..._unused: unknown[]): Promise<T> {
+  return apiJson("POST", path, body);
 }
 
 export async function apiPostStrict<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(apiUrl(path), {
+  const response = await strictFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(20_000)
   });
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
-  }
   return (await response.json()) as T;
 }
 
-export async function apiPatch<T>(path: string, body: unknown, fallback: T): Promise<T> {
-  return apiJson("PATCH", path, body, fallback);
+export async function apiPatch<T>(path: string, body: unknown, ..._unused: unknown[]): Promise<T> {
+  return apiJson("PATCH", path, body);
 }
 
-export async function apiDelete<T>(path: string, fallback: T): Promise<T> {
-  try {
-    const response = await fetch(apiUrl(path), {
-      method: "DELETE",
-      signal: AbortSignal.timeout(5000)
-    });
-    if (!response.ok) return fallback;
-    return (await response.json()) as T;
-  } catch {
-    return fallback;
-  }
+export async function apiDelete<T>(path: string, ..._unused: unknown[]): Promise<T> {
+  const response = await strictFetch(path, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(5000)
+  });
+  return (await response.json()) as T;
 }
 
-export async function apiText(path: string, fallback: string): Promise<string> {
-  try {
-    const response = await fetch(apiUrl(path), { signal: AbortSignal.timeout(5000) });
-    if (!response.ok) return fallback;
-    return await response.text();
-  } catch {
-    return fallback;
-  }
+export async function apiText(path: string, ..._unused: unknown[]): Promise<string> {
+  const response = await strictFetch(path, { signal: AbortSignal.timeout(5000) });
+  return await response.text();
 }
 
 export type ApiStreamEvent = {
@@ -105,19 +98,48 @@ export async function apiEventStream(
   }
 }
 
-async function apiJson<T>(method: "POST" | "PATCH", path: string, body: unknown, fallback: T): Promise<T> {
+async function apiJson<T>(method: "POST" | "PATCH", path: string, body: unknown): Promise<T> {
+  const response = await strictFetch(path, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(10_000)
+  });
+  return (await response.json()) as T;
+}
+
+async function strictFetch(path: string, init: RequestInit): Promise<Response> {
+  let response: Response;
   try {
-    const response = await fetch(apiUrl(path), {
-      method,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(10_000)
-    });
-    if (!response.ok) return fallback;
-    return (await response.json()) as T;
-  } catch {
-    return fallback;
+    response = await fetch(apiUrl(path), init);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Network request failed";
+    throw new ApiRequestError(message);
   }
+  if (!response.ok) {
+    const body = await readErrorBody(response);
+    throw new ApiRequestError(readErrorMessage(body, response.status), response.status, body);
+  }
+  return response;
+}
+
+async function readErrorBody(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("Content-Type") ?? "";
+  try {
+    if (contentType.includes("application/json")) return await response.json();
+    return await response.text();
+  } catch {
+    return undefined;
+  }
+}
+
+function readErrorMessage(data: unknown, status: number): string {
+  if (data && typeof data === "object" && "message" in data) {
+    const message = (data as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  if (typeof data === "string" && data.trim()) return data.trim();
+  return `Request failed: ${status}`;
 }
 
 function apiUrl(path: string): string {
