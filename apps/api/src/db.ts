@@ -2,9 +2,16 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createSeedItinerary, createSeedSkills, evaluationDataset } from "@journey/shared";
-import type { AgentSession, AgentTraceEvent, EvaluationCase, TravelItinerary, TravelSkill } from "@journey/shared";
+import type {
+  AgentSession,
+  AgentTraceEvent,
+  EvaluationCase,
+  SkillCreatorSession,
+  TravelItinerary,
+  TravelSkill
+} from "@journey/shared";
 
-type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases";
+type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases" | "skill_creator_sessions";
 
 export class JourneyDatabase {
   private readonly db: DatabaseSync;
@@ -64,6 +71,19 @@ export class JourneyDatabase {
     return session;
   }
 
+  listSkillCreatorSessions(): SkillCreatorSession[] {
+    return this.listJson<SkillCreatorSession>("skill_creator_sessions");
+  }
+
+  getSkillCreatorSession(id: string): SkillCreatorSession | undefined {
+    return this.getJson<SkillCreatorSession>("skill_creator_sessions", id);
+  }
+
+  saveSkillCreatorSession(session: SkillCreatorSession): SkillCreatorSession {
+    this.saveJson("skill_creator_sessions", session.id, session);
+    return session;
+  }
+
   deleteSessionsForItinerary(itineraryId: string): number {
     const sessions = this.listSessions().filter((session) => session.itineraryId === itineraryId);
     const sessionIds = new Set(sessions.map((session) => session.id));
@@ -115,6 +135,11 @@ export class JourneyDatabase {
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS evaluation_cases (
+        id TEXT PRIMARY KEY,
+        json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS skill_creator_sessions (
         id TEXT PRIMARY KEY,
         json TEXT NOT NULL,
         updated_at TEXT NOT NULL
