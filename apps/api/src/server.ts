@@ -9,8 +9,17 @@ import { AgentRunAbortedError, AgentService } from "./services/agentService.js";
 import { EvaluationService } from "./services/evaluationService.js";
 import { ItineraryService } from "./services/itineraryService.js";
 import { MapService } from "./services/mapService.js";
+import { SkillCreatorAgentService } from "./services/skillCreatorAgentService.js";
 import { SkillService } from "./services/skillService.js";
-import { TravelItinerarySchema, type Activity, type MapRouteMode, type RouteStep } from "@journey/shared";
+import {
+  TravelItinerarySchema,
+  type Activity,
+  type AgentRunEvent,
+  type ItineraryDay,
+  type MapRouteMode,
+  type RouteStep,
+  type TravelItinerary
+} from "@journey/shared";
 
 export type CreateAppOptions = {
   db?: JourneyDatabase;
@@ -20,6 +29,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   const db = options.db ?? createFileDatabase();
   const itineraries = new ItineraryService(db);
   const skills = new SkillService(db);
+  const skillCreatorAgents = new SkillCreatorAgentService(db);
   const agents = new AgentService(db);
   const maps = new MapService();
   const evaluation = new EvaluationService(db);
@@ -148,25 +158,19 @@ export function createApp(options: CreateAppOptions = {}): Express {
     let completed = 0;
     let skipped = 0;
     for (const day of itinerary.days) {
-      for (let index = 0; index < day.activities.length - 1; index += 1) {
-        const fromActivity = day.activities[index];
-        const toActivity = day.activities[index + 1];
-        if (!fromActivity || !toActivity) continue;
-        const existing = (day.transportLegs ?? []).some(
-          (leg) => leg.fromActivityId === fromActivity.id && leg.toActivityId === toActivity.id
-        );
-        if (existing) {
+      for (const pair of getRoutePairsForDay(itinerary, day)) {
+        if (!pair.routable) {
           skipped += 1;
           continue;
         }
-        if (!canRouteActivityPair(fromActivity, toActivity)) {
+        if (pair.exists) {
           skipped += 1;
           continue;
         }
-        const route = await maps.route(routePoint(fromActivity)!, routePoint(toActivity)!, mode);
+        const route = await maps.route(routePoint(pair.fromActivity)!, routePoint(pair.toActivity)!, mode);
         itinerary = itineraries.setTransportLeg(itinerary.id, day.id, {
-          fromActivityId: fromActivity.id,
-          toActivityId: toActivity.id,
+          fromActivityId: pair.fromActivity.id,
+          toActivityId: pair.toActivity.id,
           mode: route.mode,
           distanceMeters: route.distanceMeters,
           durationMinutes: route.durationMinutes,
@@ -175,7 +179,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
           failureReason: route.fallbackReason,
           summary: route.summary,
           polyline: route.polyline ?? [],
-          steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(toActivity))
+          steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(pair.toActivity))
         });
         completed += 1;
       }
@@ -235,6 +239,29 @@ export function createApp(options: CreateAppOptions = {}): Express {
     res.status(201).json({ skill: skills.extract(req.body.sourceText, itinerary) });
   });
 
+  app.post("/api/skills/creator/start", async (req, res) => {
+    const itinerary =
+      typeof req.body.itineraryId === "string" && req.body.itineraryId
+        ? itineraries.get(req.body.itineraryId)
+        : undefined;
+    const result = await skillCreatorAgents.start({
+      sourceText: asString(req.body.sourceText) ?? "",
+      itinerary
+    });
+    res.status(201).json(result);
+  });
+
+  app.post("/api/skills/creator/:sessionId/reply", async (req, res) => {
+    const result = await skillCreatorAgents.reply({
+      sessionId: req.params.sessionId,
+      answer: {
+        selectedOptionIds: Array.isArray(req.body.selectedOptionIds) ? req.body.selectedOptionIds : [],
+        customAnswer: asString(req.body.customAnswer) ?? ""
+      }
+    });
+    res.json(result);
+  });
+
   app.post("/api/skills/:id/publish", (req, res) => {
     res.json({ skill: skills.publish(req.params.id, req.body) });
   });
@@ -284,22 +311,19 @@ export function createApp(options: CreateAppOptions = {}): Express {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
-
     try {
-      for (const message of [
-        "正在理解你的需求",
-        "正在匹配旅行风格",
-        "正在检查地点和路线",
-        "正在更新行程"
-      ]) {
-        if (controller.signal.aborted) return;
-        send("progress", { message });
-        await delay(35);
-      }
+      const streamedActivities: AgentRunEvent[] = [];
+      const result = await agents.run(
+        { ...req.body, signal: controller.signal },
+        {
+          onEvent: (activity) => {
+            streamedActivities.push(activity);
+            send("activity", activity);
+          }
+        }
+      );
       if (controller.signal.aborted) return;
-      const result = await agents.run({ ...req.body, signal: controller.signal });
-      if (controller.signal.aborted) return;
-      send("final", result);
+      send("final", { ...result, events: result.events.length > 0 ? result.events : streamedActivities });
     } catch (error) {
       if (controller.signal.aborted || error instanceof AgentRunAbortedError) return;
       send("error", { message: error instanceof Error ? error.message : "助手暂时无法完成这次规划" });
@@ -383,15 +407,45 @@ function splitList(value: unknown): string[] {
     .filter(Boolean);
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function routePoint(activity: Activity): string | undefined {
   if (activity.place?.coordinates) {
     return `${activity.place.coordinates.lng},${activity.place.coordinates.lat}`;
   }
   return activity.placeName?.trim() || activity.place?.name?.trim() || activity.title.trim() || undefined;
+}
+
+function getRoutePairsForDay(
+  itinerary: TravelItinerary,
+  day: ItineraryDay
+): Array<{ fromActivity: Activity; toActivity: Activity; exists: boolean; routable: boolean }> {
+  const pairs: Array<{ fromActivity: Activity; toActivity: Activity; exists: boolean; routable: boolean }> = [];
+  const dayIndex = itinerary.days.findIndex((candidate) => candidate.id === day.id);
+  const previousDay = dayIndex > 0 ? itinerary.days[dayIndex - 1] : undefined;
+  const overnightStart = previousDay?.activities.at(-1);
+  const firstActivity = day.activities[0];
+  if (overnightStart && firstActivity) {
+    pairs.push({
+      fromActivity: overnightStart,
+      toActivity: firstActivity,
+      exists: hasTransportLeg(day, overnightStart.id, firstActivity.id),
+      routable: canRouteActivityPair(overnightStart, firstActivity)
+    });
+  }
+  day.activities.forEach((activity, index) => {
+    const next = day.activities[index + 1];
+    if (!next) return;
+    pairs.push({
+      fromActivity: activity,
+      toActivity: next,
+      exists: hasTransportLeg(day, activity.id, next.id),
+      routable: canRouteActivityPair(activity, next)
+    });
+  });
+  return pairs;
+}
+
+function hasTransportLeg(day: ItineraryDay, fromActivityId: string, toActivityId: string): boolean {
+  return (day.transportLegs ?? []).some((leg) => leg.fromActivityId === fromActivityId && leg.toActivityId === toActivityId);
 }
 
 function canRouteActivityPair(from: Activity, to: Activity): boolean {

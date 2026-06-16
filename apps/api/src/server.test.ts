@@ -4,6 +4,48 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryDatabase } from "./db.js";
 import { createApp } from "./server.js";
 
+type RouteCountDay = {
+  activities: unknown[];
+  transportLegs?: unknown[];
+};
+
+function expectedCompleteRouteCount(days: RouteCountDay[]): number {
+  return days.reduce((sum, day, index) => {
+    const sameDayRoutes = Math.max(0, day.activities.length - 1);
+    const crossDayStartRoute = index > 0 && (days[index - 1]?.activities.length ?? 0) > 0 && day.activities.length > 0 ? 1 : 0;
+    return sum + sameDayRoutes + crossDayStartRoute;
+  }, 0);
+}
+
+function actualRouteCount(days: RouteCountDay[]): number {
+  return days.reduce((sum, day) => sum + (day.transportLegs?.length ?? 0), 0);
+}
+
+function parseSseEvents(text: string): Array<{ event: string; data: unknown }> {
+  return text
+    .split("\n\n")
+    .map((chunk) => chunk.trim())
+    .filter(Boolean)
+    .flatMap((chunk) => {
+      const event = chunk
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("event:"))
+        ?.slice("event:".length)
+        .trim();
+      const data = chunk
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart())
+        .join("\n");
+      if (!event) return [];
+      try {
+        return [{ event, data: JSON.parse(data) }];
+      } catch {
+        return [{ event, data }];
+      }
+    });
+}
+
 describe("travel workbench API", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -670,9 +712,9 @@ describe("travel workbench API", () => {
       .send({ mode: "walking" })
       .expect(200);
 
-    expect(completed.body.completed).toBe(2);
+    expect(completed.body.completed).toBe(expectedCompleteRouteCount(completed.body.itinerary.days));
     expect(completed.body.itinerary.days[0].transportLegs).toHaveLength(1);
-    expect(completed.body.itinerary.days[1].transportLegs).toHaveLength(1);
+    expect(completed.body.itinerary.days[1].transportLegs).toHaveLength(2);
     expect(completed.body.itinerary.days[0].transportLegs[0]).toMatchObject({
       mode: "walking",
       distanceMeters: expect.any(Number),
@@ -685,6 +727,55 @@ describe("travel workbench API", () => {
       .send({ mode: "walking" })
       .expect(200);
     expect(repeated.body.completed).toBe(0);
+  });
+
+  it("uses the previous day's final activity as the next day's route start", async () => {
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+
+    const created = await request(app)
+      .post("/api/itineraries")
+      .send({
+        title: "江南跨城两日",
+        destination: "上海虹桥站",
+        startDate: "2026-07-01",
+        endDate: "2026-07-02"
+      })
+      .expect(201);
+    const itineraryId = created.body.itinerary.id;
+    const [day1, day2] = created.body.itinerary.days;
+
+    await request(app)
+      .post(`/api/itineraries/${itineraryId}/days/${day1.id}/activities`)
+      .send({ type: "attraction", title: "西湖", placeName: "西湖", startTime: "14:00" })
+      .expect(201);
+    const cafe = await request(app)
+      .post(`/api/itineraries/${itineraryId}/days/${day1.id}/activities`)
+      .send({ type: "food", title: "湖滨咖啡", placeName: "湖滨银泰", startTime: "11:30", endTime: "12:30" })
+      .expect(201);
+    const museum = await request(app)
+      .post(`/api/itineraries/${itineraryId}/days/${day2.id}/activities`)
+      .send({ type: "attraction", title: "苏州博物馆", placeName: "苏州博物馆", startTime: "10:00" })
+      .expect(201);
+    const cafeId = cafe.body.itinerary.days[0].activities.at(-1).id;
+    const museumId = museum.body.itinerary.days[1].activities[0].id;
+
+    const completed = await request(app)
+      .post(`/api/itineraries/${itineraryId}/transport-legs/complete`)
+      .send({ mode: "driving" })
+      .expect(200);
+
+    expect(completed.body.completed).toBe(2);
+    expect(completed.body.itinerary.days[0].transportLegs).toHaveLength(1);
+    expect(completed.body.itinerary.days[1].transportLegs).toHaveLength(1);
+    expect(completed.body.itinerary.days[1].transportLegs[0]).toMatchObject({
+      fromActivityId: cafeId,
+      toActivityId: museumId,
+      mode: "driving"
+    });
+    expect(completed.body.itinerary.days[1].transportLegs[0].fromActivityId).not.toBe(
+      completed.body.itinerary.days[0].activities[0].id
+    );
   });
 
   it("skips blank manual activities when completing adjacent transport legs", async () => {
@@ -917,7 +1008,7 @@ describe("travel workbench API", () => {
     expect(result.body.traces.map((trace: { agent: string }) => trace.agent)).toContain("AttractionAgent");
   });
 
-  it("lets the agent complete every missing adjacent route across the itinerary", async () => {
+  it("lets the agent complete every missing adjacent and cross-day route across the itinerary", async () => {
     const db = createInMemoryDatabase();
     const app = createApp({ db });
     const created = await request(app)
@@ -959,12 +1050,8 @@ describe("travel workbench API", () => {
 
     expect(result.body.itinerary.days[0].activities).toHaveLength(2);
     expect(result.body.itinerary.days[1].activities).toHaveLength(2);
-    const pending = result.body.itinerary.days.reduce((sum: number, day: { activities: unknown[]; transportLegs?: unknown[] }) => {
-      const expected = Math.max(0, day.activities.length - 1);
-      return sum + Math.max(0, expected - (day.transportLegs?.length ?? 0));
-    }, 0);
-    expect(pending).toBe(0);
-    expect(result.body.diff).toEqual(expect.arrayContaining(["已补全交通路线：2 段"]));
+    expect(actualRouteCount(result.body.itinerary.days)).toBe(expectedCompleteRouteCount(result.body.itinerary.days));
+    expect(result.body.diff).toEqual(expect.arrayContaining(["已补全交通路线：3 段"]));
     expect(result.body.diff.join(" ")).not.toContain("已新增活动");
   });
 
@@ -1175,7 +1262,7 @@ describe("travel workbench API", () => {
     expect(result.body.diff.join(" ")).not.toContain("已新增活动");
   });
 
-  it("updates destination, companions, and preferences in deterministic fallback without adding activities", async () => {
+  it("updates the departure point, companions, and preferences in deterministic fallback without adding activities", async () => {
     vi.stubEnv("DEEPSEEK_API_KEY", "");
     const db = createInMemoryDatabase();
     const app = createApp({ db });
@@ -1198,7 +1285,7 @@ describe("travel workbench API", () => {
       preferences: ["园林", "慢节奏", "亲子"]
     });
     expect(result.body.itinerary.days.map((day: { activities: unknown[] }) => day.activities.length)).toEqual(originalActivityCounts);
-    expect(result.body.diff).toEqual(expect.arrayContaining(["已更新目的地", "已更新偏好", "已更新同行人"]));
+    expect(result.body.diff).toEqual(expect.arrayContaining(["已更新出发点", "已更新偏好", "已更新同行人"]));
     expect(result.body.diff.join(" ")).not.toContain("已新增活动");
     expect(result.body.session.userPreferenceSummary).toContain("亲子");
   });
@@ -1642,7 +1729,7 @@ describe("travel workbench API", () => {
     expect(result.body.diff.join(" ")).not.toContain("已新增活动");
   });
 
-  it("streams user-facing planning progress before returning the final agent update", async () => {
+  it("streams public agent activity before returning the final agent update", async () => {
     const db = createInMemoryDatabase();
     const app = createApp({ db });
     const list = await request(app).get("/api/itineraries").expect(200);
@@ -1658,10 +1745,240 @@ describe("travel workbench API", () => {
       .expect(200)
       .expect("Content-Type", /text\/event-stream/);
 
-    expect(result.text).toContain("event: progress");
-    expect(result.text).toContain("正在匹配旅行风格");
+    const events = parseSseEvents(result.text);
+    expect(events.filter((event) => event.event === "activity").length).toBeGreaterThan(0);
+    expect(events.map((event) => event.event)).toContain("final");
+    expect(result.text).not.toContain("event: thought");
+    expect(result.text).not.toContain("event: action");
+    expect(result.text).not.toContain("event: tool_call");
     expect(result.text).toContain("event: final");
     expect(result.text).toContain("已更新行程");
+  });
+
+  it("streams chat-completion tool calls, tool observations, and final replies without mock thinking", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    vi.stubEnv("AGENT_MAX_TURNS", "4");
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const list = await request(app).get("/api/itineraries").expect(200);
+    const itinerary = list.body.items[0];
+    const dayId = itinerary.days[1].id;
+    const chatCompletionBodies: Array<{ messages: Array<Record<string, unknown>> }> = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      chatCompletionBodies.push(body);
+      if (chatCompletionBodies.length === 1) {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  role: "assistant",
+                  content: "我先搜索并加入浙江大学。",
+                  tool_calls: [
+                    {
+                      id: "call-place",
+                      type: "function",
+                      function: {
+                        name: "add_place_activity",
+                        arguments: JSON.stringify({
+                          dayId,
+                          query: "浙江大学",
+                          poiName: "浙江大学",
+                          type: "attraction",
+                          title: "浙江大学校园漫步",
+                          startTime: "14:00",
+                          endTime: "16:00"
+                        })
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "我已经根据搜索结果加入浙江大学，并完成本轮更新。"
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await request(app)
+      .post("/api/agent/run-stream")
+      .send({
+        itineraryId: itinerary.id,
+        message: "帮我把 Day 2 下午改成浙江大学。",
+        importedSkillIds: []
+      })
+      .expect(200)
+      .expect("Content-Type", /text\/event-stream/);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(chatCompletionBodies[1]?.messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "tool",
+          tool_call_id: "call-place"
+        })
+      ])
+    );
+    expect(JSON.stringify(chatCompletionBodies[1]?.messages)).toContain("浙江大学");
+    const events = parseSseEvents(result.text);
+    const activityEvents = events
+      .filter((event) => event.event === "activity")
+      .map((event) => event.data as { type: string; title: string; detail?: string });
+    const types = activityEvents.map((event) => event.type);
+    const firstAssistantMessageIndex = types.indexOf("assistant_message");
+    const toolCallIndex = types.indexOf("tool_call");
+    const toolResultIndex = types.indexOf("tool_result");
+    const finalAssistantMessageIndex = types.lastIndexOf("assistant_message");
+    expect(toolCallIndex).toBeGreaterThanOrEqual(0);
+    expect(firstAssistantMessageIndex).toBeGreaterThanOrEqual(0);
+    expect(firstAssistantMessageIndex).toBeLessThan(toolCallIndex);
+    expect(toolResultIndex).toBeGreaterThan(toolCallIndex);
+    expect(finalAssistantMessageIndex).toBeGreaterThan(toolResultIndex);
+    expect(types).toContain("final_signal");
+    expect(types).not.toContain("thought_summary");
+    expect(result.text).not.toContain("准备规划工具循环");
+    expect(result.text).not.toContain("AGENT_MAX_TURNS");
+    expect(result.text).not.toContain("分析用户请求");
+    expect(result.text).not.toContain("分析工具结果");
+    const finalSignal = activityEvents.find((event) => event.type === "final_signal");
+    expect(finalSignal?.detail).not.toContain("我已经根据搜索结果加入浙江大学");
+    expect(result.text).toContain("我已经根据搜索结果加入浙江大学");
+    const finalEvent = events.find((event) => event.event === "final")?.data as { events?: unknown[]; diff?: string[] };
+    expect(finalEvent.events?.length).toBeGreaterThanOrEqual(activityEvents.length);
+    expect(finalEvent.diff).toContain("已添加地点：浙江大学");
+  });
+
+  it("emits real model reasoning when a chat-completion response includes a reasoning field", async () => {
+    vi.stubEnv("AGENT_MODEL_API_KEY", "agent-model-key");
+    vi.stubEnv("AGENT_MODEL_BASE_URL", "https://llm.example.test/v1");
+    vi.stubEnv("AGENT_MODEL", "compatible-reasoning-model");
+    vi.stubEnv("DEEPSEEK_API_KEY", "");
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const list = await request(app).get("/api/itineraries").expect(200);
+    const itinerary = list.body.items[0];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(input)).toBe("https://llm.example.test/v1/chat/completions");
+      expect(init?.headers).toMatchObject({
+        Authorization: "Bearer agent-model-key"
+      });
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      expect(body.model).toBe("compatible-reasoning-model");
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                reasoning: "我需要先判断这次请求是否要修改结构化行程。",
+                content: "我先检查当前行程是否需要新增地点。"
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await request(app)
+      .post("/api/agent/run-stream")
+      .send({
+        itineraryId: itinerary.id,
+        message: "帮我看看 Day 2 下午怎么安排。",
+        importedSkillIds: []
+      })
+      .expect(200)
+      .expect("Content-Type", /text\/event-stream/);
+
+    const events = parseSseEvents(result.text);
+    const activityEvents = events
+      .filter((event) => event.event === "activity")
+      .map((event) => event.data as { type: string; title: string; detail?: string });
+    expect(activityEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "thought_summary",
+          title: "模型思考",
+          detail: "我需要先判断这次请求是否要修改结构化行程。"
+        })
+      ])
+    );
+    expect(activityEvents.map((event) => event.type)).toContain("assistant_message");
+    expect(result.text).not.toContain("用户想要「");
+  });
+
+  it("honors AGENT_MAX_TURNS instead of using a hard-coded model loop limit", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    vi.stubEnv("AGENT_MAX_TURNS", "2");
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const list = await request(app).get("/api/itineraries").expect(200);
+    const itinerary = list.body.items[0];
+    const dayId = itinerary.days[1].id;
+    let loopCallNumber = 0;
+    const fetchMock = vi.fn(async () => {
+      loopCallNumber += 1;
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: `继续第 ${loopCallNumber} 轮工具调用。`,
+                tool_calls: [
+                  {
+                    id: `call-loop-${loopCallNumber}`,
+                    type: "function",
+                    function: {
+                      name: "add_activity",
+                      arguments: JSON.stringify({
+                        dayId,
+                        type: "free_time",
+                        title: `第 ${loopCallNumber} 轮活动`,
+                        startTime: "14:00",
+                        endTime: "15:00"
+                      })
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await request(app)
+      .post("/api/agent/run")
+      .send({
+        itineraryId: itinerary.id,
+        message: "持续补充活动，直到达到配置上限。"
+      })
+      .expect(200);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.body.message.content).toContain("已达到配置的最大模型回合数（2）");
+    expect(result.body.events.map((event: { type: string }) => event.type)).toContain("final_signal");
+    expect(result.body.events.map((event: { title: string }) => event.title)).toContain("达到最大模型回合数");
   });
 
   it("stops a streamed agent request without persisting hidden background changes", async () => {
@@ -1688,7 +2005,7 @@ describe("travel workbench API", () => {
 
       const reader = response.body!.getReader();
       const firstChunk = await reader.read();
-      expect(new TextDecoder().decode(firstChunk.value)).toContain("progress");
+      expect(new TextDecoder().decode(firstChunk.value)).toContain("activity");
       controller.abort();
       await new Promise((resolve) => setTimeout(resolve, 180));
 
@@ -2392,7 +2709,7 @@ describe("travel workbench API", () => {
     expect(result.body.traces.map((trace: { agent: string }) => trace.agent)).toContain("PlannerAgent");
   });
 
-  it("lets DeepSeek complete every missing adjacent route through a route tool call", async () => {
+  it("lets DeepSeek complete every missing adjacent and cross-day route through a route tool call", async () => {
     vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
     const db = createInMemoryDatabase();
     const app = createApp({ db });
@@ -2461,14 +2778,10 @@ describe("travel workbench API", () => {
       .expect(200);
 
     expect(result.body.itinerary.days[0].transportLegs).toHaveLength(1);
-    expect(result.body.itinerary.days[1].transportLegs).toHaveLength(1);
-    const pending = result.body.itinerary.days.reduce((sum: number, day: { activities: unknown[]; transportLegs?: unknown[] }) => {
-      const expected = Math.max(0, day.activities.length - 1);
-      return sum + Math.max(0, expected - (day.transportLegs?.length ?? 0));
-    }, 0);
-    expect(pending).toBe(0);
+    expect(result.body.itinerary.days[1].transportLegs).toHaveLength(2);
+    expect(actualRouteCount(result.body.itinerary.days)).toBe(expectedCompleteRouteCount(result.body.itinerary.days));
     expect(result.body.traces.map((trace: { agent: string }) => trace.agent)).toContain("TransportAgent");
-    expect(result.body.diff).toEqual(expect.arrayContaining(["已补全交通路线：2 段"]));
+    expect(result.body.diff).toEqual(expect.arrayContaining(["已补全交通路线：3 段"]));
   });
 
   it("lets DeepSeek update itinerary dates, budget, and notes without renaming the trip", async () => {
@@ -2589,6 +2902,197 @@ describe("travel workbench API", () => {
     const listed = await request(app).get("/api/skills").expect(200);
     const persisted = listed.body.items.find((skill: { id: string }) => skill.id === extracted.body.skill.id);
     expect(persisted.versionHistory).toHaveLength(2);
+  });
+
+  it("starts a Skill creator session through the project-specific Creator Agent prompt", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    const calls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({ input, init });
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    assistantMessage: "我先确认这套风格最该保留什么。",
+                    question: "这套旅行风格换到新城市时，哪些体验必须保留？",
+                    mode: "multiple",
+                    options: [
+                      { id: "sunset", label: "傍晚留给散步和日落" },
+                      { id: "shops", label: "优先找小店和街区" },
+                      { id: "light", label: "每天最多两个核心点" }
+                    ],
+                    customPlaceholder: "也可以补充自己的说法",
+                    progressPercent: 52,
+                    draftPatch: {
+                      tags: ["松弛", "小店"],
+                      rules: ["傍晚时段优先保留低强度体验"]
+                    },
+                    done: false
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "喜欢海边散步、傍晚小店和松弛节奏。" })
+      .expect(201);
+
+    expect(result.body.session.id).toMatch(/^skill-creator-session-/);
+    expect(result.body.turn.question).toBe("这套旅行风格换到新城市时，哪些体验必须保留？");
+    expect(result.body.turn.progressPercent).toBe(52);
+    expect(result.body.session.draft.rules).toEqual(expect.arrayContaining(["傍晚时段优先保留低强度体验"]));
+    const body = JSON.parse(String(calls[0]?.init?.body ?? "{}"));
+    expect(body.messages[0].content).toContain("旅行风格 Skill 创作助手");
+    expect(body.messages[0].content).not.toContain("Skill Creation Process");
+  });
+
+  it("records creator answers and allows Agent progress to move backward", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        const content =
+          callCount === 1
+            ? {
+                question: "这套旅行风格换到新城市时，哪些体验必须保留？",
+                mode: "multiple",
+                options: [
+                  { id: "sunset", label: "傍晚留给散步和日落" },
+                  { id: "shops", label: "优先找小店和街区" },
+                  { id: "light", label: "每天最多两个核心点" }
+                ],
+                progressPercent: 70,
+                draftPatch: { rules: ["每天最多两个核心点"] },
+                done: false
+              }
+            : {
+                question: "你刚才又想密集打卡，哪一种优先级更高？",
+                mode: "single",
+                options: [
+                  { id: "relaxed", label: "保留松弛节奏" },
+                  { id: "coverage", label: "优先覆盖更多景点" },
+                  { id: "mixed", label: "每天只允许一个密集时段" }
+                ],
+                progressPercent: 55,
+                draftPatch: { forbidden: ["为了打卡塞满每天行程"] },
+                done: false
+              };
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "喜欢松弛节奏，但也想多看几个点。" })
+      .expect(201);
+
+    const reply = await request(app)
+      .post(`/api/skills/creator/${started.body.session.id}/reply`)
+      .send({
+        selectedOptionIds: ["sunset"],
+        customAnswer: "但我又有点想多打卡。"
+      })
+      .expect(200);
+
+    expect(reply.body.turn.progressPercent).toBe(55);
+    expect(reply.body.session.history).toHaveLength(1);
+    expect(reply.body.session.draft.forbidden).toEqual(expect.arrayContaining(["为了打卡塞满每天行程"]));
+  });
+
+  it("blocks done when the Agent returns an incomplete final draft", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    assistantMessage: "可以结束。",
+                    progressPercent: 100,
+                    draftPatch: { rules: [] },
+                    done: true
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "只是喜欢慢慢逛。" })
+      .expect(201);
+
+    expect(result.body.turn.done).toBe(false);
+    expect(result.body.turn.question).toBe("生成行程时，哪些安排一出现就算跑偏？");
+    expect(result.body.turn.progressPercent).toBeLessThan(100);
+  });
+
+  it("repairs malformed Creator Agent JSON once before returning the turn", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        const content =
+          callCount === 1
+            ? "我想先问：这套风格最重要什么？"
+            : JSON.stringify({
+                question: "这套旅行风格换到新城市时，哪些体验必须保留？",
+                mode: "multiple",
+                options: [
+                  { id: "sunset", label: "傍晚留给散步和日落" },
+                  { id: "shops", label: "优先找小店和街区" },
+                  { id: "light", label: "每天最多两个核心点" }
+                ],
+                progressPercent: 45,
+                draftPatch: { tags: ["松弛"] },
+                done: false
+              });
+        return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "喜欢傍晚散步和小店。" })
+      .expect(201);
+
+    expect(callCount).toBe(2);
+    expect(result.body.turn.question).toBe("这套旅行风格换到新城市时，哪些体验必须保留？");
   });
 
   it("updates skill metadata, toggles my favorite state, and lists favorite skills", async () => {
