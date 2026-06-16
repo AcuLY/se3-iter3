@@ -260,6 +260,73 @@ describe("MapService", () => {
     ]);
   });
 
+  it("forwards origin and destination cities for intercity transit so high-speed rail is returned", async () => {
+    vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.origin + url.pathname).toBe("https://restapi.amap.com/v3/direction/transit/integrated");
+      expect(url.searchParams.get("city")).toBe("苏州市");
+      expect(url.searchParams.get("cityd")).toBe("上海市");
+      expect(url.searchParams.get("origin")).toBe("120.6206,31.305");
+      expect(url.searchParams.get("destination")).toBe("121.4504,31.249");
+      return jsonResponse({
+        status: "1",
+        route: {
+          transits: [
+            {
+              distance: "84000",
+              duration: "1500",
+              segments: [
+                {
+                  walking: { steps: [] },
+                  bus: {
+                    buslines: [
+                      {
+                        name: "G7203次高铁(苏州站-上海站)",
+                        distance: "84000",
+                        duration: "1500",
+                        polyline: "120.6206,31.305;121.4504,31.249"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new MapService();
+    const route = await service.route("120.6206,31.305", "121.4504,31.249", "transit", {
+      originCity: "苏州市",
+      destinationCity: "上海市"
+    });
+
+    expect(route).toMatchObject({
+      mode: "transit",
+      source: "amap",
+      durationMinutes: 25,
+      distanceMeters: 84000
+    });
+    expect(route.summary).toContain("G7203次高铁");
+  });
+
+  it("falls back to the national transit search when no destination city is provided", async () => {
+    vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      expect(url.searchParams.get("city")).toBe("全国");
+      expect(url.searchParams.has("cityd")).toBe(false);
+      return jsonResponse({ status: "1", route: { transits: [] } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new MapService();
+    await service.route("120.141,30.259", "120.165,30.255", "transit");
+  });
+
   it("uses Amap v4 bicycling routes instead of falling back to local estimates", async () => {
     vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

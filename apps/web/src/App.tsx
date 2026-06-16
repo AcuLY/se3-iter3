@@ -516,6 +516,31 @@ export default function App() {
     }
   }
 
+  async function loadConversationMessages(itineraryId: string): Promise<ChatMessage[]> {
+    try {
+      const result = await apiGet<{
+        items: Array<
+          | { type: "session"; sessionId: string; createdAt: string; updatedAt: string }
+          | {
+              type: "message";
+              sessionId: string;
+              messageId: string;
+              role: "user" | "assistant" | "system";
+              content: string;
+              createdAt: string;
+            }
+        >;
+      }>(`/agent/history/conversations/${encodeURIComponent(itineraryId)}`);
+      return result.items
+        .filter((item): item is Extract<typeof item, { type: "message" }> => item.type === "message")
+        .filter((item) => item.role === "user" || item.role === "assistant")
+        .map((item) => ({ role: item.role as "user" | "assistant", content: item.content }));
+    } catch (error) {
+      if (error instanceof Error && "status" in error && (error as { status?: unknown }).status === 404) return [];
+      throw error;
+    }
+  }
+
   function setPage(nextPage: Page) {
     setPageState(nextPage);
     if (typeof window === "undefined") return;
@@ -560,6 +585,12 @@ export default function App() {
           setImportedSkillIds(loaded.importedSkillIds ?? []);
           markSaved(loaded.updatedAt);
           rememberLastItineraryId(loaded.id);
+          try {
+            const restoredMessages = await loadConversationMessages(loaded.id);
+            if (!cancelled) setMessages(restoredMessages);
+          } catch {
+            // Restoring history is best-effort; leave messages empty on failure.
+          }
         } else {
           setItinerary(EMPTY_ITINERARY);
           itineraryRef.current = EMPTY_ITINERARY;
@@ -647,6 +678,12 @@ export default function App() {
     setMessages([]);
     markSaved(normalized.updatedAt);
     rememberLastItineraryId(normalized.id);
+    try {
+      const restoredMessages = await loadConversationMessages(normalized.id);
+      setMessages(restoredMessages);
+    } catch {
+      // Restoring history is best-effort; leave messages empty on failure.
+    }
   }
 
   async function archiveItinerary(itineraryId: string) {
@@ -6995,7 +7032,10 @@ function AgentPanel({
 
 function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g;
+  // Order matters: bold (**) before italic (*); explicit links before autolinks
+  // so we don't double-wrap link URLs.
+  const pattern =
+    /(\*\*[^*\n]+\*\*|~~[^~\n]+~~|`[^`\n]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\)|\*[^*\n]+\*|_[^_\n]+_|https?:\/\/[^\s)]+)/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text))) {
@@ -7008,13 +7048,19 @@ function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
           {token.slice(2, -2)}
         </strong>
       );
+    } else if (token.startsWith("~~") && token.endsWith("~~")) {
+      nodes.push(
+        <s key={key} className="line-through text-muted-foreground">
+          {token.slice(2, -2)}
+        </s>
+      );
     } else if (token.startsWith("`") && token.endsWith("`")) {
       nodes.push(
         <code key={key} className="rounded-md bg-[#f6f6f3] px-1 py-0.5 font-mono text-[0.92em] text-foreground">
           {token.slice(1, -1)}
         </code>
       );
-    } else {
+    } else if (token.startsWith("[")) {
       const linkMatch = token.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
       if (linkMatch) {
         nodes.push(
@@ -7031,6 +7077,26 @@ function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
       } else {
         nodes.push(token);
       }
+    } else if (token.startsWith("http")) {
+      nodes.push(
+        <a
+          key={key}
+          href={token}
+          target="_blank"
+          rel="noreferrer"
+          className="font-bold underline underline-offset-2"
+        >
+          {token}
+        </a>
+      );
+    } else if ((token.startsWith("*") && token.endsWith("*")) || (token.startsWith("_") && token.endsWith("_"))) {
+      nodes.push(
+        <em key={key} className="italic">
+          {token.slice(1, -1)}
+        </em>
+      );
+    } else {
+      nodes.push(token);
     }
     lastIndex = pattern.lastIndex;
   }
@@ -7066,7 +7132,13 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
       continue;
     }
 
-    const headingMatch = line.match(/^(#{1,3})\s+(.+)$/);
+    if (/^\s*([-*_])\1{2,}\s*$/.test(line)) {
+      blocks.push(<hr key={`hr-${index}`} className="my-3 border-t border-border" data-testid="markdown-hr" />);
+      index += 1;
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       const marker = headingMatch[1] ?? "#";
       const headingText = headingMatch[2] ?? "";
@@ -7076,13 +7148,33 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
           ? "text-base font-black"
           : level === 2
             ? "text-sm font-black"
-            : "text-xs font-black uppercase tracking-normal text-muted-foreground";
+            : level === 3
+              ? "text-xs font-black uppercase tracking-normal text-muted-foreground"
+              : "text-xs font-black text-muted-foreground";
       blocks.push(
-        <p key={`heading-${index}`} className={className}>
+        <p key={`heading-${index}`} className={className} data-heading-level={level}>
           {renderInlineMarkdown(headingText, `heading-${index}`)}
         </p>
       );
       index += 1;
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index] ?? "")) {
+        quoteLines.push((lines[index] ?? "").replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(
+        <blockquote
+          key={`quote-${index}`}
+          className="border-l-2 border-primary/40 pl-3 leading-6 text-muted-foreground"
+          data-testid="markdown-quote"
+        >
+          {renderInlineMarkdown(quoteLines.join(" "), `quote-${index}`)}
+        </blockquote>
+      );
       continue;
     }
 
@@ -7131,9 +7223,45 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
       continue;
     }
 
+    if (/^\s*[-*]\s+\[[ xX]\]\s+/.test(line)) {
+      const items: Array<{ checked: boolean; content: string }> = [];
+      while (index < lines.length && /^\s*[-*]\s+\[[ xX]\]\s+/.test(lines[index] ?? "")) {
+        const taskMatch = (lines[index] ?? "").match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)$/);
+        if (taskMatch) {
+          items.push({ checked: taskMatch[1]?.toLowerCase() === "x", content: taskMatch[2] ?? "" });
+        }
+        index += 1;
+      }
+      blocks.push(
+        <ul key={`task-${index}`} className="grid gap-1.5" data-testid="markdown-task-list">
+          {items.map((item, itemIndex) => (
+            <li
+              key={`task-${index}-${itemIndex}`}
+              className="grid grid-cols-[auto_minmax(0,1fr)] gap-2"
+            >
+              <input
+                type="checkbox"
+                checked={item.checked}
+                readOnly
+                disabled
+                aria-label="任务复选框"
+                className="mt-1 size-3.5 rounded border-border accent-primary"
+              />
+              <span>{renderInlineMarkdown(item.content, `task-${index}-${itemIndex}`)}</span>
+            </li>
+          ))}
+        </ul>
+      );
+      continue;
+    }
+
     if (/^\s*[-*]\s+/.test(line)) {
       const items: string[] = [];
-      while (index < lines.length && /^\s*[-*]\s+/.test(lines[index] ?? "")) {
+      while (
+        index < lines.length &&
+        /^\s*[-*]\s+/.test(lines[index] ?? "") &&
+        !/^\s*[-*]\s+\[[ xX]\]\s+/.test(lines[index] ?? "")
+      ) {
         items.push((lines[index] ?? "").replace(/^\s*[-*]\s+/, ""));
         index += 1;
       }
@@ -7174,9 +7302,11 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
     while (
       index < lines.length &&
       (lines[index] ?? "").trim() &&
-      !/^(#{1,3})\s+/.test(lines[index] ?? "") &&
+      !/^(#{1,6})\s+/.test(lines[index] ?? "") &&
       !/^\s*[-*]\s+/.test(lines[index] ?? "") &&
       !/^\s*\d+\.\s+/.test(lines[index] ?? "") &&
+      !/^\s*>\s?/.test(lines[index] ?? "") &&
+      !/^\s*([-*_])\1{2,}\s*$/.test(lines[index] ?? "") &&
       !/^```/.test(lines[index] ?? "") &&
       !isMarkdownTableStart(lines, index)
     ) {

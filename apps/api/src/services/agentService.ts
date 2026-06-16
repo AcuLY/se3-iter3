@@ -30,6 +30,7 @@ import {
   type ChatCompletionToolCall
 } from "./chatCompletionClient.js";
 import { HistoryService } from "./historyService.js";
+import { ConversationContextService } from "./conversationContextService.js";
 import { ItineraryService } from "./itineraryService.js";
 import { MapService, type PoiResult } from "./mapService.js";
 import { MemoryService } from "./memoryService.js";
@@ -77,12 +78,14 @@ export class AgentService {
   private readonly maps = new MapService();
   private readonly memories: MemoryService;
   private readonly history: HistoryService;
+  private readonly conversationContext: ConversationContextService;
 
   constructor(private readonly db: JourneyDatabase) {
     this.itineraries = new ItineraryService(db);
     this.skills = new SkillService(db);
     this.memories = new MemoryService(db);
     this.history = new HistoryService(db);
+    this.conversationContext = new ConversationContextService(db);
   }
 
   async run(input: AgentRunInput, options: AgentRunOptions = {}): Promise<AgentRunResult> {
@@ -111,12 +114,31 @@ export class AgentService {
     const memorySnapshotText = this.memories.buildSnapshotText();
     const sessionId = createId("session");
     const context = this.createRunContext(sessionId, options);
+    const priorContext = await this.conversationContext.build({
+      itineraryId: input.itineraryId,
+      modelConfig,
+      signal: input.signal
+    });
+    throwIfAborted(input.signal);
     const traces: AgentTraceEvent[] = [
       this.trace(sessionId, "MainAgent", "message", "读取行程上下文", `${itinerary.title} / ${itinerary.days.length} 天`),
       this.trace(sessionId, "MainAgent", "message", "读取已保存记忆", memorySnapshotText),
       this.trace(sessionId, "StyleAgent", "tool_call", "读取已导入 Skill", importedSkills.map((skill) => skill.displayName).join("、") || "未导入 Skill"),
       this.trace(sessionId, "PlannerAgent", "handoff", "准备调用规划工具", "根据模型 tool_calls 操作结构化行程")
     ];
+    if (priorContext.messages.length > 0) {
+      traces.push(
+        this.trace(
+          sessionId,
+          "MainAgent",
+          "message",
+          "拼接历史对话",
+          priorContext.summary
+            ? `已注入 ${priorContext.messages.length} 条历史消息（含摘要）`
+            : `已注入 ${priorContext.messages.length} 条历史消息`
+        )
+      );
+    }
     const messages: ChatCompletionMessage[] = [
       {
         role: "system",
@@ -127,10 +149,12 @@ export class AgentService {
           "当用户表达稳定、可长期复用的偏好、禁忌或回答风格时，你可以主动维护 saved memories。",
           "只有当用户明显提到过去、上次、之前、历史里的某个行程或对话时，才调用历史对话工具。",
           "当用户只是询问地点是否存在、路线如何、天气怎样，而没有要求修改行程时，优先使用只读查询工具，不要为了查询创建临时活动或写入画布。",
+          "只读查询工具（不会修改画布）：路线/交通时长/跨城高铁/驾车 → preview_transport_modes（自动识别同城与跨城，跨城会返回高铁/动车与驾车方案）；POI 候选 → search_poi；天气 → get_day_weather。用户问“怎么走 / 多远 / 多久 / 是否存在 / 哪天天气”这类问题时，先调这些工具再回答，不要凭训练知识凑答案。",
           "普通用户不需要看到内部 Agent 名称；可以输出简短行动说明，但不要展示内部推理链路。",
           "回复正文只做简短总结，不要列出本轮 diff；系统会在对话末尾追加结构化改动清单。"
         ].join("\n")
       },
+      ...priorContext.messages,
       {
         role: "user",
         content: JSON.stringify({
@@ -367,6 +391,7 @@ export class AgentService {
       importedSkillIds: state.importedSkillIds,
       traces: state.traces,
       contextSummary,
+      historicalContextSummary: priorContext.summary,
       memorySnapshotText,
       createdAt: nowIso(),
       updatedAt: nowIso()
@@ -688,12 +713,27 @@ export class AgentService {
       } else if (toolName === "preview_transport_modes") {
         const from = await this.resolvePoiQuery(String(parsed.fromQuery ?? parsed.from ?? ""), asOptionalString(parsed.fromPoiName), signal);
         const to = await this.resolvePoiQuery(String(parsed.toQuery ?? parsed.to ?? ""), asOptionalString(parsed.toPoiName), signal);
-        const modes = parseRouteModesFromTool(parsed.modes);
+        const originCity = from.poi.city?.trim() || undefined;
+        const destinationCity = to.poi.city?.trim() || undefined;
+        const crossCity = Boolean(originCity && destinationCity && originCity !== destinationCity);
+        const userSpecifiedModes = Array.isArray(parsed.modes) && parsed.modes.length >= 2;
+        // For intercity queries (e.g. 苏州站→上海站) the model usually wants
+        // 高铁/动车 (transit with cityd) and driving fallback. Walking/cycling
+        // across cities is meaningless and pollutes the comparison.
+        const modes =
+          crossCity && !userSpecifiedModes
+            ? (["transit", "driving"] as MapRouteMode[])
+            : parseRouteModesFromTool(parsed.modes);
         const strategy = parsed.strategy === "shortest" ? "shortest" : "fastest";
         const routes: RouteSummary[] = [];
         for (const mode of modes) {
           throwIfAborted(signal);
-          routes.push(await this.maps.route(from.routePoint, to.routePoint, mode));
+          routes.push(
+            await this.maps.route(from.routePoint, to.routePoint, mode, {
+              originCity,
+              destinationCity
+            })
+          );
         }
         const ranked = routes
           .slice()
@@ -705,12 +745,17 @@ export class AgentService {
         return {
           status: "completed",
           title: "preview_transport_modes 执行完成",
-          summary: `已返回 ${ranked.length} 种交通方式对比。`,
+          summary: crossCity
+            ? `已返回 ${ranked.length} 种跨城交通方式对比（${originCity ?? "?"} → ${destinationCity ?? "?"}）。`
+            : `已返回 ${ranked.length} 种交通方式对比。`,
           diff: [],
           output: {
             from: summarizePoiCandidate(from.poi),
             to: summarizePoiCandidate(to.poi),
             strategy,
+            crossCity,
+            originCity,
+            destinationCity,
             routes: ranked
           }
         };
