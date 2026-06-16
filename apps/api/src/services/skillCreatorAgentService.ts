@@ -142,7 +142,8 @@ function buildCreatorMessages(session: SkillCreatorSession): DeepSeekMessage[] {
 function isFinalTurnPatchReady(turn: SkillCreatorTurn): boolean {
   const patch = turn.draftPatch;
   return Boolean(
-    patch.displayName?.trim() &&
+    patch.name?.trim() &&
+      patch.displayName?.trim() &&
       patch.description?.trim() &&
       patch.body?.trim() &&
       patch.tags?.some((tag) => tag.trim()) &&
