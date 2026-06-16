@@ -105,7 +105,16 @@ export class SkillCreatorAgentService {
   private async nextTurn(session: SkillCreatorSession): Promise<SkillCreatorTurn> {
     const messages = buildCreatorMessages(session);
     const raw = await this.llmClient(messages);
-    const parsed = await parseCreatorTurnWithRepair(raw, messages, this.llmClient);
+    let parsed = await parseCreatorTurnWithRepair(raw, messages, this.llmClient);
+    if (isRepeatedQuestionTurn(session, parsed)) {
+      parsed = await requestNonRepeatedTurn({
+        session,
+        messages,
+        attemptedRawTurn: raw,
+        attemptedTurn: parsed,
+        llmClient: this.llmClient
+      });
+    }
     if (isIncompleteFinalTurn(session, parsed)) {
       return requestContinuationTurn({
         session,
@@ -128,10 +137,32 @@ function buildCreatorMessages(session: SkillCreatorSession): SkillCreatorMessage
         sourceText: session.sourceText,
         currentDraft: session.draft,
         currentQuestion: session.currentTurn,
+        previousQuestions: previousCreatorQuestions(session),
         history: session.history
       })
     }
   ];
+}
+
+function previousCreatorQuestions(session: SkillCreatorSession): string[] {
+  return [
+    ...session.history.map((item) => item.question),
+    session.currentTurn?.question
+  ].filter((question): question is string => Boolean(question?.trim()));
+}
+
+function normalizeQuestionText(question: string | undefined): string {
+  return (question ?? "")
+    .replace(/[？?。！!，,、\s]/g, "")
+    .trim()
+    .toLowerCase();
+}
+
+function isRepeatedQuestionTurn(session: SkillCreatorSession, turn: SkillCreatorTurn): boolean {
+  if (turn.done || !turn.question) return false;
+  const nextQuestion = normalizeQuestionText(turn.question);
+  if (!nextQuestion) return false;
+  return previousCreatorQuestions(session).some((question) => normalizeQuestionText(question) === nextQuestion);
 }
 
 function isFinalTurnPatchReady(turn: SkillCreatorTurn): boolean {
@@ -193,6 +224,36 @@ async function requestContinuationTurn(input: {
   const turn = await parseCreatorTurnWithRepair(raw, continuationMessages, input.llmClient);
   if (isIncompleteFinalTurn(input.session, turn)) {
     throw new Error("Creator Agent returned an incomplete final draft");
+  }
+  return turn;
+}
+
+async function requestNonRepeatedTurn(input: {
+  session: SkillCreatorSession;
+  messages: SkillCreatorMessage[];
+  attemptedRawTurn: string;
+  attemptedTurn: SkillCreatorTurn;
+  llmClient: LlmClient;
+}): Promise<SkillCreatorTurn> {
+  const retryMessages: SkillCreatorMessage[] = [
+    ...input.messages,
+    { role: "assistant", content: input.attemptedRawTurn },
+    {
+      role: "user",
+      content: JSON.stringify({
+        contractIssue: "你刚才返回的问题与 previousQuestions/currentQuestion/history 中已问过的问题重复。",
+        repeatedQuestion: input.attemptedTurn.question,
+        previousQuestions: previousCreatorQuestions(input.session),
+        currentDraft: input.session.draft,
+        requiredAction:
+          "请换一个尚未确认的信息缺口继续提问。只返回新的 JSON 对象；done 为 false 时必须包含新的 question、mode 和 3 到 5 个 options。"
+      })
+    }
+  ];
+  const raw = await input.llmClient(retryMessages);
+  const turn = await parseCreatorTurnWithRepair(raw, retryMessages, input.llmClient);
+  if (isRepeatedQuestionTurn(input.session, turn)) {
+    throw new Error("Creator Agent repeated a previous question");
   }
   return turn;
 }

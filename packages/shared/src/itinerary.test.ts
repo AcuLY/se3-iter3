@@ -293,6 +293,8 @@ describe("itinerary editing helpers", () => {
       "路线步骤：1. 步行至龙翔桥站（600 m，8 分钟）；2. 乘坐地铁 1 号线（2.6 km，20 分钟）"
     );
     expect(exportItineraryMarkdown(itinerary)).toContain("总预算：1800 元");
+    expect(exportItineraryMarkdown(itinerary)).toContain("出发点：杭州");
+    expect(exportItineraryMarkdown(itinerary)).not.toContain("目的地：杭州");
     expect(exportItineraryMarkdown(itinerary)).toContain("营业时间：08:30-17:00");
     expect(exportItineraryMarkdown(itinerary)).toContain("电话：0571-12345678");
     expect(exportItineraryMarkdown(itinerary)).toContain("参考人均：68 元");

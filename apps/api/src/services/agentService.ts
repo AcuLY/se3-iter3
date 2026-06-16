@@ -195,6 +195,7 @@ export class AgentService {
         content: [
           "你是旅行规划主 Agent。你必须通过工具调用修改结构化行程，不要只输出文本。",
           "你可以读取导入的旅行风格 Skill、全局已保存记忆和当前行程。",
+          "当前行程 JSON 里的 destination 字段是历史命名，语义是出发点；不要把出发点当作行程目的地，也不要因为活动城市不同就建议更正 destination。",
           "系统会直接注入一段全局记忆快照。除非你需要精确编辑某条记忆，否则不要为了感知手动编辑而先调用记忆列表工具。",
           "当用户表达稳定、可长期复用的偏好、禁忌或回答风格时，你可以主动维护 saved memories。",
           "只有当用户明显提到过去、上次、之前、历史里的某个行程或对话时，才调用历史对话工具。",
@@ -2667,7 +2668,7 @@ function compactTechnicalValue(value: unknown): unknown {
 function summarizeItineraryForToolObservation(itinerary: TravelItinerary) {
   return {
     title: itinerary.title,
-    destination: itinerary.destination,
+    departurePoint: itinerary.destination,
     days: itinerary.days.map((day) => ({
       title: day.title,
       activities: day.activities.map((activity) => ({

@@ -338,6 +338,86 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByRole("button", { name: "进入工作台" })).not.toBeInTheDocument();
   });
 
+  it("keeps the workbench map header compact without repeating the departure point", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const mapPanel = screen.getByTestId("map-panel");
+    expect(within(mapPanel).getByText("行程地图")).toBeInTheDocument();
+    expect(within(mapPanel).queryByRole("heading", { name: /^出发点：/ })).not.toBeInTheDocument();
+  });
+
+  it("contains long current-trip sidebar history rows inside the sidebar", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    const currentTripButton = screen.getByRole("button", { name: /当前行程：杭州三日松弛游/ });
+    const currentTripRow = currentTripButton.closest("[data-testid='sidebar-history-item']");
+    expect(currentTripRow).toHaveClass("overflow-hidden");
+    expect(currentTripButton).toHaveClass("overflow-hidden");
+    expect(within(currentTripButton).queryByText("当前")).not.toBeInTheDocument();
+    expect(within(currentTripButton).getByText("西湖 · 07/01-07/03 · 3 天")).toBeInTheDocument();
+    expect(within(currentTripButton).queryByText(/出发点/)).not.toBeInTheDocument();
+  });
+
+  it("expands the compact workbench sidebar so past conversations stay reachable", async () => {
+    const user = userEvent.setup();
+    const seed = createSeedItinerary();
+    const custom = createDraftItinerary({
+      title: "厦门亲子四日",
+      destination: "厦门",
+      startDate: "2026-08-10",
+      endDate: "2026-08-13",
+      budgetCny: 4200,
+      preferences: ["亲子", "海边"]
+    });
+    window.history.replaceState(null, "", "#/workbench");
+    window.localStorage.setItem("journey:last-itinerary-id", custom.id);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/api/itineraries")) {
+          return new Response(JSON.stringify({ items: [seed, custom] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills") || url.includes("/api/agent/sessions") || url.includes("/api/memories")) {
+          return new Response(JSON.stringify({ items: [] }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("Not found", { status: 404 });
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "厦门亲子四日" })).toBeInTheDocument();
+    const appShell = screen.getByTestId("app-shell");
+    expect(appShell).toHaveClass("lg:grid-cols-[72px_minmax(0,1fr)_clamp(440px,38vw,540px)]");
+
+    const expandSidebar = screen.getByRole("button", { name: "展开会话记录" });
+    expect(expandSidebar).toHaveAttribute("aria-expanded", "false");
+
+    await user.click(expandSidebar);
+
+    expect(expandSidebar).toHaveAttribute("aria-expanded", "true");
+    expect(appShell).toHaveClass("lg:grid-cols-[280px_minmax(0,1fr)_clamp(440px,38vw,540px)]");
+    expect(screen.getByTestId("sidebar-history-list")).toHaveClass("flex");
+
+    await user.click(screen.getByRole("button", { name: "打开行程：杭州三日松弛游" }));
+
+    expect(await screen.findByRole("heading", { name: "杭州三日松弛游" })).toBeInTheDocument();
+    expect(window.localStorage.getItem("journey:last-itinerary-id")).toBe(seed.id);
+  });
+
   it("restores direct links for the travel style plaza routes", () => {
     window.history.replaceState(null, "", "#/skills");
     const firstRender = render(<App />);
@@ -3161,7 +3241,7 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.getByRole("heading", { name: "这套旅行风格最适合在哪类请求里触发？" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "第一次到海边城市" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "想慢慢逛小店" })).toBeInTheDocument();
-    expect(screen.getByLabelText("补充答案")).toBeInTheDocument();
+    expect(screen.getByLabelText("其他答案")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交回答" })).toBeDisabled();
     expect(screen.queryByRole("heading", { name: "创作 Skill" })).not.toBeInTheDocument();
     expect(screen.queryByText("把旅行经验交给创作助手，由它主持问题并生成可发布的旅行风格。")).not.toBeInTheDocument();
@@ -3219,7 +3299,7 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "开始创作" }));
     await user.click(await screen.findByRole("button", { name: "保留傍晚小店" }));
     await user.click(screen.getByRole("button", { name: "安排海边散步" }));
-    await user.type(screen.getByLabelText("补充答案"), "每天最多两个核心安排");
+    await user.type(screen.getByLabelText("其他答案"), "每天最多两个核心安排");
     await user.click(screen.getByRole("button", { name: "提交回答" }));
 
     await waitFor(() => {
@@ -3373,11 +3453,11 @@ describe("Travel Skill Agent frontend", () => {
     await user.type(screen.getByLabelText("来源材料"), "海边散步、傍晚小店、不要赶路。");
     await user.click(screen.getByRole("button", { name: "开始创作" }));
     await user.click(await screen.findByRole("button", { name: "保留傍晚小店" }));
-    await user.type(screen.getByLabelText("补充答案"), "需要保留日落后的自由时间");
+    await user.type(screen.getByLabelText("其他答案"), "需要保留日落后的自由时间");
     await user.click(screen.getByRole("button", { name: "提交回答" }));
 
     expect(await screen.findByText("创作助手没有返回可用问题，请重试本题。")).toBeInTheDocument();
-    expect(screen.getByLabelText("补充答案")).toHaveValue("需要保留日落后的自由时间");
+    expect(screen.getByLabelText("其他答案")).toHaveValue("需要保留日落后的自由时间");
 
     await user.click(screen.getByRole("button", { name: "提交回答" }));
 
@@ -3647,9 +3727,10 @@ describe("Travel Skill Agent frontend", () => {
       "这段模型输出可能会比较长，需要限制在步骤内部滚动，而不是把整个助手输入区挤下去。",
       "我会继续保留工具调用记录。"
     ].join("");
+    const defaultFetch = globalThis.fetch;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/agent/run-stream")) {
           return new Response(
@@ -3705,7 +3786,7 @@ describe("Travel Skill Agent frontend", () => {
             { status: 200, headers: { "Content-Type": "text/event-stream" } }
           );
         }
-        return new Response("Not found", { status: 404 });
+        return defaultFetch(input, init);
       })
     );
     const user = userEvent.setup();
@@ -3788,9 +3869,10 @@ describe("Travel Skill Agent frontend", () => {
         detail: "已添加地点：浙江省博物馆"
       })
     ];
+    const defaultFetch = globalThis.fetch;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/agent/run-stream")) {
           return new Response(
@@ -3807,7 +3889,7 @@ describe("Travel Skill Agent frontend", () => {
             { status: 200, headers: { "Content-Type": "text/event-stream" } }
           );
         }
-        return new Response("Not found", { status: 404 });
+        return defaultFetch(input, init);
       })
     );
     const user = userEvent.setup();
@@ -3842,7 +3924,92 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByText("准备规划工具循环")).not.toBeInTheDocument();
   });
 
-  it("keeps the completed agent log anchored when expanding it inside the message scroll area", async () => {
+  it("restores completed agent activity from conversation history without expanding it by default", async () => {
+    const seed = createSeedItinerary();
+    window.history.replaceState(null, "", "#/workbench");
+    window.localStorage.setItem("journey:last-itinerary-id", seed.id);
+    const defaultFetch = globalThis.fetch;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/agent/history/conversations/")) {
+          return new Response(
+            JSON.stringify({
+              itinerary: {
+                id: seed.id,
+                title: seed.title,
+                destination: seed.destination,
+                updatedAt: seed.updatedAt
+              },
+              items: [
+                {
+                  type: "session",
+                  sessionId: "session-restored",
+                  createdAt: "2026-06-16T08:00:00.000Z",
+                  updatedAt: "2026-06-16T08:00:01.000Z",
+                  traces: [
+                    {
+                      id: "trace-restored-output",
+                      sessionId: "session-restored",
+                      agent: "MainAgent",
+                      type: "message",
+                      title: "行动输出",
+                      detail: "我会先检查当前行程。",
+                      createdAt: "2026-06-16T08:00:00.300Z"
+                    },
+                    {
+                      id: "trace-restored-tool",
+                      sessionId: "session-restored",
+                      agent: "AttractionAgent",
+                      type: "tool_call",
+                      title: "搜索地点",
+                      detail: "南京大学苏州校区",
+                      createdAt: "2026-06-16T08:00:00.600Z"
+                    }
+                  ]
+                },
+                {
+                  type: "message",
+                  sessionId: "session-restored",
+                  messageId: "msg-restored-user",
+                  role: "user",
+                  content: "帮我看看 Day 1 怎么调整。",
+                  createdAt: "2026-06-16T08:00:00.000Z"
+                },
+                {
+                  type: "message",
+                  sessionId: "session-restored",
+                  messageId: "msg-restored-assistant",
+                  role: "assistant",
+                  content: "我已经看到你的当前行程了。",
+                  createdAt: "2026-06-16T08:00:01.000Z"
+                }
+              ]
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return defaultFetch(input, init);
+      })
+    );
+
+    render(<App />);
+
+    expect(await screen.findByText("我已经看到你的当前行程了。")).toBeInTheDocument();
+    const activityToggle = screen.getByRole("button", { name: /Agent 执行记录/ });
+    expect(activityToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("已完成模型与工具调用 · 1 步")).toBeInTheDocument();
+    expect(screen.queryByText("南京大学苏州校区")).not.toBeInTheDocument();
+
+    await userEvent.setup().click(activityToggle);
+
+    const activityLog = screen.getByRole("group", { name: "Agent 执行记录" });
+    expect(within(activityLog).getByText("搜索地点")).toBeInTheDocument();
+    expect(within(activityLog).getByText("南京大学苏州校区")).toBeInTheDocument();
+  });
+
+  it("keeps the completed agent log anchored when toggling it inside the message scroll area", async () => {
     const seed = createSeedItinerary();
     const runEvents = [
       testAgentRunEvent({
@@ -3867,9 +4034,10 @@ describe("Travel Skill Agent frontend", () => {
         detail: "地点已确认"
       })
     ];
+    const defaultFetch = globalThis.fetch;
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/agent/run-stream")) {
           return new Response(
@@ -3893,7 +4061,7 @@ describe("Travel Skill Agent frontend", () => {
             { status: 200, headers: { "Content-Type": "text/event-stream" } }
           );
         }
-        return new Response("Not found", { status: 404 });
+        return defaultFetch(input, init);
       })
     );
     const user = userEvent.setup();

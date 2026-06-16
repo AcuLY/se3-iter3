@@ -223,7 +223,26 @@ describe("travel workbench API", () => {
         { id: "msg-hz-assistant", role: "assistant", content: "已记录咖啡和慢节奏偏好。", createdAt: "2026-06-16T08:00:01.000Z" }
       ],
       importedSkillIds: [],
-      traces: [],
+      traces: [
+        {
+          id: "trace-hz-reply",
+          sessionId: "session-hz",
+          agent: "MainAgent",
+          type: "message",
+          title: "行动输出",
+          detail: "已确认雨天备选。",
+          createdAt: "2026-06-16T08:00:00.500Z"
+        },
+        {
+          id: "trace-hz-tool",
+          sessionId: "session-hz",
+          agent: "AttractionAgent",
+          type: "tool_call",
+          title: "搜索地点",
+          detail: "雨天备选",
+          createdAt: "2026-06-16T08:00:00.700Z"
+        }
+      ],
       contextSummary: "用户希望保留咖啡和慢节奏，并寻找雨天备选。",
       userPreferenceSummary: "咖啡、慢节奏",
       createdAt: "2026-06-16T08:00:00.000Z",
@@ -278,6 +297,13 @@ describe("travel workbench API", () => {
         });
         expect(res.body.items.map((item: { type: string }) => item.type)).toContain("session");
         expect(res.body.items.map((item: { type: string }) => item.type)).toContain("message");
+        expect(res.body.items.find((item: { type: string }) => item.type === "session")).toMatchObject({
+          sessionId: "session-hz",
+          traces: [
+            { id: "trace-hz-reply", type: "message", title: "行动输出" },
+            { id: "trace-hz-tool", type: "tool_call", title: "搜索地点" }
+          ]
+        });
       });
   });
 
@@ -1264,6 +1290,50 @@ describe("travel workbench API", () => {
     expect(result.body.message.content).toContain("杭州确实有祥睦桥");
     expect(result.body.diff).toEqual([]);
     expect(result.body.itinerary).toEqual(before);
+  });
+
+  it("tells the model that the legacy destination field means departure point", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const itinerary = db.listItineraries()[0]!;
+    const deepseekBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.origin + url.pathname === "https://api.deepseek.com/chat/completions") {
+          deepseekBodies.push(JSON.parse(String(init?.body)));
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: "我会把当前字段理解为出发点，而不是行程目的地。"
+                  }
+                }
+              ]
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        throw new Error(`Unexpected fetch: ${String(input)}`);
+      })
+    );
+
+    await request(app)
+      .post("/api/agent/run")
+      .send({
+        itineraryId: itinerary.id,
+        message: "当前模型对出发点的理解仍有误"
+      })
+      .expect(200);
+
+    expect(deepseekBodies).toHaveLength(1);
+    const systemPrompt = deepseekBodies[0]!.messages.find((message) => message.role === "system")!.content;
+    expect(systemPrompt).toContain("destination 字段是历史命名，语义是出发点");
+    expect(systemPrompt).toContain("不要把出发点当作行程目的地");
   });
 
   it("lets the model preview transport modes without saving a transport leg", async () => {
@@ -2771,6 +2841,107 @@ describe("travel workbench API", () => {
     expect(reply.body.turn.progressPercent).toBe(55);
     expect(reply.body.session.history).toHaveLength(1);
     expect(reply.body.session.draft.forbidden).toEqual(expect.arrayContaining(["为了打卡塞满每天行程"]));
+  });
+
+  it("asks the Creator Agent to replace a repeated question with full context", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        callCount += 1;
+        requestBodies.push(JSON.parse(String((init as RequestInit).body ?? "{}")));
+        const content =
+          callCount === 1
+            ? {
+                question: "Which experiences must stay in this travel style?",
+                mode: "multiple",
+                options: [
+                  { id: "sunset", label: "Sunset walks" },
+                  { id: "shops", label: "Small local shops" },
+                  { id: "slow-days", label: "Slow days" }
+                ],
+                progressPercent: 45,
+                draftPatch: { tags: ["slow-travel"] },
+                done: false
+              }
+            : callCount === 2
+              ? {
+                  question: "Which experiences must stay in this travel style?",
+                  mode: "multiple",
+                  options: [
+                    { id: "sunset", label: "Sunset walks" },
+                    { id: "shops", label: "Small local shops" },
+                    { id: "slow-days", label: "Slow days" }
+                  ],
+                  progressPercent: 55,
+                  draftPatch: { rules: ["Keep sunset time open"] },
+                  done: false
+                }
+              : {
+                  question: "Which arrangements should this style avoid?",
+                  mode: "multiple",
+                  options: [
+                    { id: "packed-days", label: "Packed days" },
+                    { id: "long-transfers", label: "Long transfers" },
+                    { id: "hot-walks", label: "Long walks in hot weather" }
+                  ],
+                  progressPercent: 65,
+                  draftPatch: { forbidden: ["Packed days"] },
+                  done: false
+                };
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "I like sunset walks, small shops, and slow travel days." })
+      .expect(201);
+
+    const reply = await request(app)
+      .post(`/api/skills/creator/${started.body.session.id}/reply`)
+      .send({
+        selectedOptionIds: ["sunset"],
+        customAnswer: "Keep evenings flexible"
+      })
+      .expect(200);
+
+    expect(callCount).toBe(3);
+    expect(requestBodies).toHaveLength(3);
+    const replyBody = requestBodies[1];
+    const retryBody = requestBodies[2];
+    if (!replyBody || !retryBody) throw new Error("Creator Agent test did not capture expected request bodies");
+    const replyContextMessage = replyBody.messages[1];
+    const retryMessage = retryBody.messages.at(-1);
+    if (!replyContextMessage || !retryMessage) throw new Error("Creator Agent test did not capture expected messages");
+    const replyContext = JSON.parse(replyContextMessage.content);
+    const retryInstruction = JSON.parse(retryMessage.content);
+    expect(reply.body.turn.question).toBe("Which arrangements should this style avoid?");
+    expect(replyContext).toMatchObject({
+      sourceText: "I like sunset walks, small shops, and slow travel days.",
+      currentDraft: expect.any(Object),
+      currentQuestion: expect.objectContaining({ question: "Which experiences must stay in this travel style?" }),
+      previousQuestions: expect.arrayContaining(["Which experiences must stay in this travel style?"]),
+      history: [
+        expect.objectContaining({
+          question: "Which experiences must stay in this travel style?",
+          selectedOptionIds: ["sunset"],
+          customAnswer: "Keep evenings flexible"
+        })
+      ]
+    });
+    expect(retryInstruction).toMatchObject({
+      repeatedQuestion: "Which experiences must stay in this travel style?",
+      previousQuestions: expect.arrayContaining(["Which experiences must stay in this travel style?"])
+    });
+    expect(retryInstruction.contractIssue).toContain("previousQuestions");
   });
 
   it("asks the Agent for another question when done returns an incomplete final draft", async () => {

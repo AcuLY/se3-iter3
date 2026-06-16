@@ -591,7 +591,7 @@ export function exportItineraryMarkdown(itinerary: TravelItinerary): string {
   const lines: string[] = [
     `# ${itinerary.title}`,
     "",
-    `目的地：${itinerary.destination}`,
+    `出发点：${itinerary.destination}`,
     `日期：${itinerary.startDate} 至 ${itinerary.endDate ?? itinerary.startDate}`
   ];
 

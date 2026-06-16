@@ -66,6 +66,8 @@ import {
   Home,
   MapPinned,
   MapPin,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Plus,
   Route,
@@ -275,6 +277,16 @@ function activityRouteName(from: Activity, to: Activity, fromIndex?: number, toI
 
 function activityMapLabel(activity: Activity, index?: number): string {
   return activityPrimaryPlaceName(activity) || activityDisplayName(activity, index);
+}
+
+function itinerarySidebarPlaceText(itinerary: TravelItinerary): string {
+  for (const day of itinerary.days) {
+    for (const activity of day.activities) {
+      const label = activityMapLabel(activity).trim();
+      if (label && label !== "待补全安排") return label;
+    }
+  }
+  return itinerary.destination;
 }
 
 function activityTimeSummary(activity: Activity): string | undefined {
@@ -504,6 +516,7 @@ export default function App() {
   );
   const [newTripDialogOpen, setNewTripDialogOpen] = useState(false);
   const [initialDataLoaded, setInitialDataLoaded] = useState(false);
+  const [workbenchSidebarExpanded, setWorkbenchSidebarExpanded] = useState(false);
   const savedMemoryKeywords = useMemo(() => deriveSavedMemoryKeywords(savedMemories, skills), [savedMemories, skills]);
 
   async function loadSavedMemories() {
@@ -520,7 +533,7 @@ export default function App() {
     try {
       const result = await apiGet<{
         items: Array<
-          | { type: "session"; sessionId: string; createdAt: string; updatedAt: string }
+          | { type: "session"; sessionId: string; createdAt: string; updatedAt: string; traces?: AgentTraceEvent[] }
           | {
               type: "message";
               sessionId: string;
@@ -531,10 +544,22 @@ export default function App() {
             }
         >;
       }>(`/agent/history/conversations/${encodeURIComponent(itineraryId)}`);
+      const sessionsById = new Map(
+        result.items
+          .filter((item): item is Extract<typeof item, { type: "session" }> => item.type === "session")
+          .map((item) => [item.sessionId, item])
+      );
       return result.items
         .filter((item): item is Extract<typeof item, { type: "message" }> => item.type === "message")
         .filter((item) => item.role === "user" || item.role === "assistant")
-        .map((item) => ({ role: item.role as "user" | "assistant", content: item.content }));
+        .map((item) => {
+          const message: ChatMessage = { role: item.role as "user" | "assistant", content: item.content };
+          const traces = sessionsById.get(item.sessionId)?.traces ?? [];
+          if (item.role === "assistant" && traces.length > 0) {
+            message.runLog = buildRestoredAgentRunLog(item.sessionId, traces);
+          }
+          return message;
+        });
     } catch (error) {
       if (error instanceof Error && "status" in error && (error as { status?: unknown }).status === 404) return [];
       throw error;
@@ -634,8 +659,13 @@ export default function App() {
     [importedSkillIds, itinerary, savedMemoryKeywords, skills]
   );
   const showAgentPanel = page === "workbench" && itineraries.length > 0;
+  const expandedWorkbenchShell = showAgentPanel && workbenchSidebarExpanded;
   const shellGridClass = showAgentPanel
-    ? "grid h-dvh min-h-0 grid-cols-1 overflow-hidden min-[769px]:grid-cols-[minmax(0,1fr)_clamp(440px,46vw,500px)] lg:grid-cols-[72px_minmax(0,1fr)_clamp(440px,38vw,540px)] 2xl:grid-cols-[280px_minmax(0,1fr)_clamp(520px,30vw,620px)]"
+    ? `grid h-dvh min-h-0 grid-cols-1 overflow-hidden min-[769px]:grid-cols-[minmax(0,1fr)_clamp(440px,46vw,500px)] ${
+        expandedWorkbenchShell
+          ? "lg:grid-cols-[280px_minmax(0,1fr)_clamp(440px,38vw,540px)]"
+          : "lg:grid-cols-[72px_minmax(0,1fr)_clamp(440px,38vw,540px)]"
+      } 2xl:grid-cols-[280px_minmax(0,1fr)_clamp(520px,30vw,620px)]`
     : "grid min-h-screen grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]";
 
   async function addManualActivity(activity?: ActivityDraft) {
@@ -1260,6 +1290,8 @@ export default function App() {
             onSelectItinerary={(itineraryId) => void selectItinerary(itineraryId)}
             onArchiveItinerary={(itineraryId) => void archiveItinerary(itineraryId)}
             onDeleteItinerary={(itineraryId) => void deleteItineraryFromHistory(itineraryId)}
+            workbenchSidebarExpanded={workbenchSidebarExpanded}
+            onToggleWorkbenchSidebar={() => setWorkbenchSidebarExpanded((expanded) => !expanded)}
           />
           <main
             data-testid={page === "workbench" ? "workbench-main" : undefined}
@@ -1523,6 +1555,17 @@ function buildCompletedAgentRunLog(
   return {
     id: base.id,
     status: "completed",
+    expanded: false,
+    summary: completedAgentRunSummary(items),
+    items
+  };
+}
+
+function buildRestoredAgentRunLog(sessionId: string, traces: AgentTraceEvent[]): AgentRunLog {
+  const items = sortAgentTraces(traces).map(agentTraceToActivityItem);
+  return {
+    id: `agent-history-${sessionId}`,
+    status: items.some((item) => item.status === "failed") ? "failed" : "completed",
     expanded: false,
     summary: completedAgentRunSummary(items),
     items
@@ -2387,7 +2430,9 @@ function Sidebar({
   itineraries,
   onSelectItinerary,
   onArchiveItinerary,
-  onDeleteItinerary
+  onDeleteItinerary,
+  workbenchSidebarExpanded,
+  onToggleWorkbenchSidebar
 }: {
   page: Page;
   onNavigate: (page: Page) => void;
@@ -2397,6 +2442,8 @@ function Sidebar({
   onSelectItinerary: (itineraryId: string) => void;
   onArchiveItinerary: (itineraryId: string) => void;
   onDeleteItinerary: (itineraryId: string) => void;
+  workbenchSidebarExpanded: boolean;
+  onToggleWorkbenchSidebar: () => void;
 }) {
   const entries: Array<{ page: Page; label: string; icon: typeof Home }> = [
     { page: "workbench", label: "当前行程", icon: MapPinned },
@@ -2409,22 +2456,26 @@ function Sidebar({
     return counts;
   }, {});
   const compactSidebar = page === "workbench";
+  const collapsedCompactSidebar = compactSidebar && !workbenchSidebarExpanded;
+  const compactLabelClass = collapsedCompactSidebar && "hidden 2xl:inline";
+  const compactContentClass = collapsedCompactSidebar ? "hidden 2xl:flex" : "flex";
+  const compactButtonClass = collapsedCompactSidebar ? "justify-center px-0 2xl:justify-start 2xl:px-4" : "justify-start";
   const showFullHistory = page === "workbench" || page === "creator";
   return (
-    <aside className={cn("hidden min-h-0 flex-col border-r border-border bg-[#fbfbf9] lg:flex", compactSidebar ? "px-2 py-4 2xl:p-4" : "p-4")}>
+    <aside className={cn("hidden min-h-0 flex-col border-r border-border bg-[#fbfbf9] lg:flex", collapsedCompactSidebar ? "px-2 py-4 2xl:p-4" : "p-4")}>
       <button
-        className={cn("mb-6 flex min-h-10 items-center gap-3 text-left text-base font-black", compactSidebar ? "justify-center 2xl:justify-start" : "justify-start")}
+        className={cn("mb-6 flex min-h-10 items-center gap-3 text-left text-base font-black", collapsedCompactSidebar ? "justify-center 2xl:justify-start" : "justify-start")}
         onClick={() => onNavigate("home")}
         aria-label="回到首页"
         title="Journey"
       >
         <span className="flex size-10 items-center justify-center rounded-full bg-primary text-primary-foreground">J</span>
-        <span className={cn(compactSidebar && "hidden 2xl:inline")}>Journey</span>
+        <span className={cn(compactLabelClass)}>Journey</span>
       </button>
       <div className="flex flex-col gap-2">
-        <Button className={cn(compactSidebar ? "justify-center px-0 2xl:justify-start 2xl:px-4" : "justify-start")} onClick={onOpenNewTrip} aria-label="新建行程" title="新建行程">
+        <Button className={cn(compactButtonClass)} onClick={onOpenNewTrip} aria-label="新建行程" title="新建行程">
           <Plus data-icon="inline-start" />
-          <span className={cn(compactSidebar && "hidden 2xl:inline")}>新建行程</span>
+          <span className={cn(compactLabelClass)}>新建行程</span>
         </Button>
         {entries.map((entry) => {
           const Icon = entry.icon;
@@ -2432,20 +2483,34 @@ function Sidebar({
             <Button
               key={entry.page}
               variant={page === entry.page ? "secondary" : "ghost"}
-              className={cn(compactSidebar ? "justify-center px-0 2xl:justify-start 2xl:px-4" : "justify-start")}
+              className={cn(compactButtonClass)}
               onClick={() => onNavigate(entry.page)}
               aria-label={entry.label}
               title={entry.label}
             >
               <Icon data-icon="inline-start" />
-              <span className={cn(compactSidebar && "hidden 2xl:inline")}>{entry.label}</span>
+              <span className={cn(compactLabelClass)}>{entry.label}</span>
             </Button>
           );
         })}
+        {compactSidebar ? (
+          <Button
+            type="button"
+            variant="ghost"
+            className={cn(compactButtonClass)}
+            onClick={onToggleWorkbenchSidebar}
+            aria-expanded={workbenchSidebarExpanded}
+            aria-label={workbenchSidebarExpanded ? "收起会话记录" : "展开会话记录"}
+            title={workbenchSidebarExpanded ? "收起会话记录" : "展开会话记录"}
+          >
+            {workbenchSidebarExpanded ? <PanelLeftClose data-icon="inline-start" /> : <PanelLeftOpen data-icon="inline-start" />}
+            <span className={cn(compactLabelClass)}>{workbenchSidebarExpanded ? "收起会话记录" : "展开会话记录"}</span>
+          </Button>
+        ) : null}
       </div>
-      <Separator className={cn("my-5", compactSidebar && "hidden 2xl:block")} />
+      <Separator className={cn("my-5", collapsedCompactSidebar && "hidden 2xl:block")} />
       {showFullHistory ? (
-        <div className={cn("flex-1 flex-col gap-3", compactSidebar ? "hidden 2xl:flex" : "flex")}>
+        <div data-testid="sidebar-history-list" className={cn("flex-1 flex-col gap-3", compactContentClass)}>
           <p className="text-xs font-bold text-muted-foreground">会话记录</p>
           <div className="grid gap-2">
             {itineraries.slice(0, 6).map((item) => {
@@ -2455,28 +2520,24 @@ function Sidebar({
               return (
                 <div
                   key={item.id}
+                  data-testid="sidebar-history-item"
                   className={cn(
-                    "group relative rounded-2xl bg-white p-2 text-sm font-semibold transition-colors hover:bg-secondary",
+                    "group relative max-w-full overflow-hidden rounded-2xl bg-white p-2 text-sm font-semibold transition-colors hover:bg-secondary",
                     active && "bg-secondary ring-1 ring-border before:absolute before:inset-y-3 before:left-0 before:w-1 before:rounded-r-full before:bg-primary"
                   )}
                 >
-                  <div className="flex items-start gap-2">
+                  <div className="flex min-w-0 items-start gap-2">
                     <button
                       type="button"
-                      className="min-w-0 flex-1 rounded-xl px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      className="min-w-0 flex-1 overflow-hidden rounded-xl px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                       onClick={() => onSelectItinerary(item.id)}
                       aria-label={`${active ? "当前行程" : "打开行程"}：${item.title}`}
                     >
                       <span className="flex min-w-0 items-start justify-between gap-2">
                         <span className="min-w-0 truncate">{item.title}</span>
-                        {active && (
-                          <span className="shrink-0 rounded-full bg-primary px-2 py-0.5 text-[10px] font-black text-primary-foreground">
-                            当前
-                          </span>
-                        )}
                       </span>
                       <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
-                        出发点 {item.destination} · {compactDateRange(item)} · {item.days.length} 天
+                        {itinerarySidebarPlaceText(item)} · {compactDateRange(item)} · {item.days.length} 天
                         {duplicateTitle ? " · 同名行程" : ""}
                       </span>
                       <span className="mt-1 block truncate text-[11px] font-semibold text-muted-foreground/80">
@@ -2514,7 +2575,7 @@ function Sidebar({
           </div>
         </div>
       ) : (
-        <div className={cn("flex-1 flex-col gap-3", compactSidebar ? "hidden 2xl:flex" : "flex")}>
+        <div className={cn("flex-1 flex-col gap-3", compactContentClass)}>
           <p className="text-xs font-bold text-muted-foreground">当前规划</p>
           <button
             type="button"
@@ -2524,7 +2585,7 @@ function Sidebar({
           >
             <span className="block truncate font-black">{itinerary.title}</span>
             <span className="mt-1 block truncate text-xs font-normal text-muted-foreground">
-              出发点 {itinerary.destination} · {compactDateRange(itinerary)} · {itinerary.days.length} 天
+              {itinerarySidebarPlaceText(itinerary)} · {compactDateRange(itinerary)} · {itinerary.days.length} 天
             </span>
             <span className="mt-2 inline-flex rounded-full bg-[#f6f6f3] px-2.5 py-1 text-[11px] font-black text-foreground">
               回到画布
@@ -4544,7 +4605,6 @@ function MapPanel({
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[#dadad3] bg-white px-3 py-3 md:gap-4 md:px-4">
         <div className="min-w-0 self-center">
           <p className="hidden text-sm font-bold text-[#62625b] md:block">行程地图</p>
-          <h3 className="truncate text-lg font-black text-[#211922] md:text-2xl">出发点：{itinerary.destination}</h3>
           {points.length > 0 && <p className="sr-only">{routeSummary}</p>}
           <div className="mt-1 flex flex-wrap gap-1.5 md:mt-2 md:gap-2" aria-hidden="true">
             {visibleMapSummaryItems.map((item, index) => (
@@ -8097,12 +8157,14 @@ function SkillCreator({
   const [customAnswer, setCustomAnswer] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [busyStage, setBusyStage] = useState<"starting" | "thinking" | null>(null);
   const [error, setError] = useState("");
 
   async function handleStart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!sourceText.trim() || busy) return;
     setBusy(true);
+    setBusyStage("starting");
     setError("");
     try {
       const result = await onStart();
@@ -8115,6 +8177,7 @@ function SkillCreator({
       setError("创作助手暂时无法开始，请稍后重试。");
     } finally {
       setBusy(false);
+      setBusyStage(null);
     }
   }
 
@@ -8123,6 +8186,7 @@ function SkillCreator({
     if (!session || !turn || busy) return;
     if (!customAnswer.trim() && selectedOptionIds.length === 0) return;
     setBusy(true);
+    setBusyStage("thinking");
     setError("");
     try {
       const result = await onCreatorReply(session.id, {
@@ -8138,6 +8202,7 @@ function SkillCreator({
       setError("创作助手没有返回可用问题，请重试本题。");
     } finally {
       setBusy(false);
+      setBusyStage(null);
     }
   }
 
@@ -8146,6 +8211,20 @@ function SkillCreator({
     setSelectedOptionIds((current) => {
       if (turn.mode === "single") return current.includes(option.id) ? [] : [option.id];
       return current.includes(option.id) ? current.filter((id) => id !== option.id) : [...current, option.id];
+    });
+  }
+
+  function isCustomOption(option: SkillCreatorOption): boolean {
+    return /(其他|自定义|补充|自己写|另填)/.test(option.label);
+  }
+
+  function updateInlineCustomAnswer(value: string, option?: SkillCreatorOption) {
+    setCustomAnswer(value);
+    if (!option || !turn?.mode) return;
+    setSelectedOptionIds((current) => {
+      const withoutCustom = current.filter((id) => id !== option.id);
+      if (!value.trim()) return withoutCustom;
+      return turn.mode === "single" ? [option.id] : [...withoutCustom, option.id];
     });
   }
 
@@ -8189,7 +8268,12 @@ function SkillCreator({
         </div>
       )}
 
-      {!session || !turn ? (
+      {busyStage === "starting" && !session && !turn ? (
+        <SkillCreatorLoadingState
+          title="准备中"
+          description="创作助手正在读取来源材料，生成第一道问题。"
+        />
+      ) : !session || !turn ? (
         <form className="grid min-w-0 gap-5 min-[1180px]:min-h-0 min-[1180px]:flex-1 min-[1180px]:grid-cols-[minmax(0,1.02fr)_minmax(320px,0.78fr)] min-[1180px]:items-stretch" onSubmit={handleStart}>
           <section className="flex min-w-0 flex-col rounded-[16px] border border-[#dadad3] bg-[#fbfbf9] p-4 min-[1180px]:min-h-0 md:p-5">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -8296,6 +8380,29 @@ function SkillCreator({
           <div className="grid gap-3">
             {(turn.options ?? []).map((option) => {
               const selected = selectedOptionIds.includes(option.id);
+              if (isCustomOption(option)) {
+                return (
+                  <label
+                    key={option.id}
+                    className={cn(
+                      "grid gap-2 rounded-xl border px-4 py-3 text-left",
+                      selected || customAnswer.trim()
+                        ? "border-primary bg-primary/5"
+                        : "border-input bg-background"
+                    )}
+                  >
+                    <span className="text-base font-black leading-6">{option.label.replace(/[（(].*[）)]/, "").trim() || "其他"}</span>
+                    <Input
+                      value={customAnswer}
+                      onChange={(event) => updateInlineCustomAnswer(event.target.value, option)}
+                      onFocus={() => updateInlineCustomAnswer(customAnswer, option)}
+                      aria-label="其他答案"
+                      placeholder={turn.customPlaceholder ?? "写下你的补充答案"}
+                      disabled={busy}
+                    />
+                  </label>
+                );
+              }
               return (
                 <Button
                   key={option.id}
@@ -8309,17 +8416,31 @@ function SkillCreator({
                 </Button>
               );
             })}
+            {!(turn.options ?? []).some(isCustomOption) && (
+              <label
+                className={cn(
+                  "grid gap-2 rounded-xl border px-4 py-3 text-left",
+                  customAnswer.trim() ? "border-primary bg-primary/5" : "border-input bg-background"
+                )}
+              >
+                <span className="text-base font-black leading-6">其他</span>
+                <Input
+                  value={customAnswer}
+                  onChange={(event) => updateInlineCustomAnswer(event.target.value)}
+                  aria-label="其他答案"
+                  placeholder={turn.customPlaceholder ?? "写下你的补充答案"}
+                  disabled={busy}
+                />
+              </label>
+            )}
           </div>
-          <label className="grid gap-2 text-sm font-black text-muted-foreground">
-            补充答案
-            <Input
-              value={customAnswer}
-              onChange={(event) => setCustomAnswer(event.target.value)}
-              aria-label="补充答案"
-              placeholder={turn.customPlaceholder ?? "也可以写自己的答案"}
-              disabled={busy}
+          {busyStage === "thinking" && (
+            <SkillCreatorLoadingState
+              compact
+              title="思考中"
+              description="创作助手正在结合你的答案和前文上下文，生成下一步问题或最终草稿。"
             />
-          </label>
+          )}
           {error && <p className="text-sm font-bold text-destructive">{error}</p>}
           <div className="mt-auto flex justify-end border-t border-border pt-4">
             <Button type="submit" className="rounded-xl" disabled={busy || (!customAnswer.trim() && selectedOptionIds.length === 0)}>
@@ -8330,6 +8451,40 @@ function SkillCreator({
         </form>
       )}
     </main>
+  );
+}
+
+function SkillCreatorLoadingState({
+  title,
+  description,
+  compact = false
+}: {
+  title: string;
+  description: string;
+  compact?: boolean;
+}) {
+  return (
+    <section
+      role="status"
+      aria-live="polite"
+      className={cn(
+        "rounded-xl border border-border bg-[#fbfbf9] p-5",
+        compact ? "grid gap-3" : "flex min-h-[360px] flex-1 flex-col justify-center gap-5"
+      )}
+    >
+      <div className="flex items-center gap-3">
+        <span className="size-5 shrink-0 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-primary" aria-hidden="true" />
+        <div>
+          <p className="text-base font-black text-foreground">{title}</p>
+          <p className="mt-1 text-sm font-semibold leading-6 text-muted-foreground">{description}</p>
+        </div>
+      </div>
+      <div className="grid gap-2" aria-hidden="true">
+        <span className="h-3 w-3/4 animate-pulse rounded-full bg-[#e5e5e0]" />
+        <span className="h-3 w-1/2 animate-pulse rounded-full bg-[#e5e5e0]" />
+        {!compact && <span className="h-24 animate-pulse rounded-[16px] bg-white" />}
+      </div>
+    </section>
   );
 }
 

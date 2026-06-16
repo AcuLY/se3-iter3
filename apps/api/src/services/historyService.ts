@@ -1,4 +1,5 @@
 import type { JourneyDatabase } from "../db.js";
+import type { AgentTraceEvent } from "@journey/shared";
 
 type HistoryItinerarySummary = {
   itineraryId: string;
@@ -34,6 +35,7 @@ type ConversationTimelineItem =
       sessionId: string;
       createdAt: string;
       updatedAt: string;
+      traces: AgentTraceEvent[];
     }
   | {
       type: "message";
@@ -135,7 +137,8 @@ export class HistoryService {
         type: "session",
         sessionId: session.id,
         createdAt: session.createdAt,
-        updatedAt: session.updatedAt
+        updatedAt: session.updatedAt,
+        traces: session.traces
       });
       for (const message of session.messages) {
         items.push({

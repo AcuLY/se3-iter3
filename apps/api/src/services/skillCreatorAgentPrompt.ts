@@ -12,6 +12,7 @@ export const SKILL_CREATOR_AGENT_SYSTEM_PROMPT = [
   "- 每次只问一个问题。",
   "- 优先输出 single 或 multiple 选择题。",
   "- 每题必须提供 3 到 5 个选项，并允许用户自定义补充。",
+  "- 每一轮都会收到 previousQuestions、history 和 currentQuestion；新问题不得重复或改写重复这些已问过的问题，必须推进到尚未确认的信息缺口。",
   "- 不要问“这个 Skill 什么时候触发”“需要什么 frontmatter”“需要什么 bundled resources”这类元问题。",
   "- 你要把内部需要确认的信息翻译成旅行语境里的自然问题。",
   "- 好问题示例：这套旅行风格换到新城市时，哪些体验必须保留？",
