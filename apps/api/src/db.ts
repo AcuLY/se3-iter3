@@ -1,18 +1,17 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { createSeedItinerary, createSeedSkills, evaluationDataset } from "@journey/shared";
+import { createSeedItinerary, createSeedSkills } from "@journey/shared";
 import type {
   AgentSession,
   AgentTraceEvent,
-  EvaluationCase,
   SavedMemory,
   SkillCreatorSession,
   TravelItinerary,
   TravelSkill
 } from "@journey/shared";
 
-type TableName = "itineraries" | "skills" | "sessions" | "traces" | "evaluation_cases" | "skill_creator_sessions" | "memories";
+type TableName = "itineraries" | "skills" | "sessions" | "traces" | "skill_creator_sessions" | "memories";
 
 export class JourneyDatabase {
   private readonly db: DatabaseSync;
@@ -127,10 +126,6 @@ export class JourneyDatabase {
     return trace;
   }
 
-  listEvaluationCases(): EvaluationCase[] {
-    return this.listJson<EvaluationCase>("evaluation_cases");
-  }
-
   private initialize(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS itineraries (
@@ -149,11 +144,6 @@ export class JourneyDatabase {
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS traces (
-        id TEXT PRIMARY KEY,
-        json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS evaluation_cases (
         id TEXT PRIMARY KEY,
         json TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -179,9 +169,6 @@ export class JourneyDatabase {
       if (!this.getSkill(skill.id)) {
         this.saveSkill(skill);
       }
-    }
-    for (const evaluationCase of evaluationDataset) {
-      this.saveJson("evaluation_cases", evaluationCase.id, evaluationCase);
     }
   }
 

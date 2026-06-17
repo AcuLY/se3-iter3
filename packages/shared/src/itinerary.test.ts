@@ -582,7 +582,7 @@ describe("itinerary editing helpers", () => {
     });
   });
 
-  it("marks fallback transport legs as local estimates in itinerary export", () => {
+  it("renders manual transport legs without route provider attribution in itinerary export", () => {
     let itinerary = createDraftItinerary({
       title: "杭州路线来源",
       destination: "杭州",
@@ -606,12 +606,12 @@ describe("itinerary editing helpers", () => {
       mode: "walking",
       distanceMeters: 1300,
       durationMinutes: 18,
-      provider: "mock",
+      provider: "manual",
       summary: "步行路线建议"
     });
 
     expect(exportItineraryMarkdown(itinerary)).toContain(
-      "交通：步行，1.3 km，18 分钟（本地估算；步行路线建议）"
+      "交通：步行，1.3 km，18 分钟（手动路线；步行路线建议）"
     );
   });
 

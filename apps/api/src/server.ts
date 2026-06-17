@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 import type { JourneyDatabase } from "./db.js";
 import { createFileDatabase } from "./db.js";
 import { AgentRunAbortedError, AgentService } from "./services/agentService.js";
-import { EvaluationService } from "./services/evaluationService.js";
 import { HistoryService } from "./services/historyService.js";
 import { ItineraryService } from "./services/itineraryService.js";
 import { MapService } from "./services/mapService.js";
@@ -18,7 +17,6 @@ import {
   type Activity,
   type AgentRunEvent,
   type ItineraryDay,
-  type MapRouteMode,
   type RouteStep,
   type TravelItinerary
 } from "@journey/shared";
@@ -34,7 +32,6 @@ export function createApp(options: CreateAppOptions = {}): Express {
   const skillCreatorAgents = new SkillCreatorAgentService(db);
   const agents = new AgentService(db);
   const maps = new MapService();
-  const evaluation = new EvaluationService(db);
   const memories = new MemoryService(db);
   const history = new HistoryService(db);
 
@@ -140,7 +137,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       note,
       manualOverride,
       polyline: route.polyline ?? [],
-      steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(toActivity))
+      steps: localizeRouteSteps(route.steps ?? [])
     });
     res.json({ itinerary, route });
   });
@@ -181,7 +178,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
           routeStatus: route.status,
           summary: route.summary,
           polyline: route.polyline ?? [],
-          steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, activityDisplayName(pair.toActivity))
+          steps: localizeRouteSteps(route.steps ?? [])
         });
         completed += 1;
       }
@@ -412,13 +409,6 @@ export function createApp(options: CreateAppOptions = {}): Express {
     });
   });
 
-  app.get("/api/evaluation/cases", (_req, res) => {
-    res.json({ items: evaluation.listCases() });
-  });
-
-  app.get("/api/evaluation/summary", (_req, res) => {
-    res.json(evaluation.summary());
-  });
 
   app.use((error: unknown, _req: Request, res: Response, _next: () => void) => {
     const message = error instanceof Error ? error.message : "Unknown server error";
@@ -513,30 +503,8 @@ function activityDisplayName(activity: Activity): string {
   return activity.title.trim() || activity.placeName?.trim() || activity.place?.name?.trim() || "未命名活动";
 }
 
-function localizeRouteSteps(
-  steps: RouteStep[],
-  source: "amap" | "mock",
-  mode: MapRouteMode,
-  toTitle: string
-): RouteStep[] {
-  const normalized = steps.map((step) => ({ ...step, polyline: step.polyline ?? [] }));
-  if (source !== "mock" || normalized.length !== 1) return normalized;
-  return [
-    {
-      ...normalized[0]!,
-      instruction: `${routeActionLabel(mode)}前往${toTitle}`
-    }
-  ];
-}
-
-function routeActionLabel(mode: MapRouteMode): string {
-  const labels: Record<MapRouteMode, string> = {
-    walking: "步行",
-    transit: "公交/地铁",
-    driving: "驾车",
-    cycling: "骑行"
-  };
-  return labels[mode];
+function localizeRouteSteps(steps: RouteStep[]): RouteStep[] {
+  return steps.map((step) => ({ ...step, polyline: step.polyline ?? [] }));
 }
 
 const entry = process.argv[1] ? fileURLToPath(import.meta.url) === process.argv[1] : false;

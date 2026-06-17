@@ -2,14 +2,12 @@ import {
   addActivity,
   addDay,
   addDayBefore,
-  aggregateEvaluation,
   appendSkillVersion,
   buildSkillMarkdown,
   buildExtractedSkillDraftTitle,
   createDraftItinerary,
   detectTransportTimingConflict,
   diffItineraries,
-  evaluationDataset,
   moveActivity,
   normalizeSkillVersionHistory,
   parseSkillMarkdown,
@@ -92,7 +90,7 @@ import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 
-type Page = "home" | "workbench" | "result" | "skills" | "creator" | "settings" | "evaluation";
+type Page = "home" | "workbench" | "result" | "skills" | "creator" | "settings";
 type MapRouteFocusRequest = { dayId: string; legId: string; nonce: number };
 const LAST_ITINERARY_ID_KEY = "journey:last-itinerary-id";
 const ASSISTANT_PROMPT_SUGGESTIONS = [
@@ -244,8 +242,7 @@ const pageRoutes: Record<Page, string> = {
   result: "/result",
   skills: "/skills",
   creator: "/creator",
-  settings: "/settings",
-  evaluation: "/evaluation"
+  settings: "/settings"
 };
 const routePages = Object.fromEntries(Object.entries(pageRoutes).map(([page, route]) => [route, page])) as Record<string, Page>;
 const routeAliases: Record<string, Page> = {
@@ -1386,7 +1383,6 @@ export default function App() {
                 onDeleteMemory={deleteSavedMemory}
               />
             )}
-            {page === "evaluation" && <EvaluationPage />}
           </main>
           {showAgentPanel && (
             <>
@@ -2905,7 +2901,7 @@ type PlaceSearchItem = {
   openingHours?: string;
   averageCostCny?: number;
   photos?: Place["photos"];
-  source?: "amap" | "mock";
+  source?: "amap";
   location: NonNullable<Place["coordinates"]>;
 };
 type SearchPlaceActivityFields = Pick<Activity, "title" | "type"> & {
@@ -8821,224 +8817,9 @@ function SavedMemorySettings({
   );
 }
 
-function EvaluationPage() {
-  const [sessions, setSessions] = useState<AgentSession[]>([]);
-  const [traces, setTraces] = useState<AgentTraceEvent[]>([]);
-  const [skills, setSkills] = useState<TravelSkill[]>([]);
-  const before = evaluationDataset.map((item) => ({
-    ...item,
-    output: {
-      ...item.output,
-      itineraryText: item.output.itineraryText.replaceAll("慢节奏", "").replaceAll("轻松", ""),
-      days: Math.max(1, item.output.days - 1),
-      preservedActivityIds: [],
-      toolCalls: item.output.toolCalls.filter((agent) => agent !== "CriticAgent"),
-      scriptErrors: ["baseline bad case"]
-    }
-  }));
-  const summary = aggregateEvaluation(before, evaluationDataset);
-  useEffect(() => {
-    let cancelled = false;
-    async function loadAgentEvidence() {
-      try {
-        const [sessionResult, traceResult, skillResult] = await Promise.all([
-          apiGet<{ items: AgentSession[] }>("/agent/sessions"),
-          apiGet<{ items: AgentTraceEvent[] }>("/agent/traces"),
-          apiGet<{ items: TravelSkill[] }>("/skills")
-        ]);
-        if (cancelled) return;
-        setSessions(sortAgentSessions(sessionResult.items));
-        setTraces(sortAgentTraces(traceResult.items));
-        setSkills(skillResult.items);
-      } catch {
-        if (cancelled) return;
-        setSessions([]);
-        setTraces([]);
-        setSkills([]);
-      }
-    }
-    void loadAgentEvidence();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  const latestSession = sessions[0];
-  const latestTraces = latestSession ? traces.filter((trace) => trace.sessionId === latestSession.id) : traces;
-  const agentSummaries = summarizeAgentTraces(latestTraces);
-  const latestImportedSkillNames = latestSession
-    ? latestSession.importedSkillIds
-        .map((skillId) => skills.find((skill) => skill.id === skillId)?.displayName ?? skillId)
-        .map((name) => name.replace(/\s+\d{3,}$/, "").trim())
-    : [];
-  return (
-    <div className="min-h-screen overflow-auto bg-white p-6">
-      <div className="mb-6">
-        <h2 className="text-3xl font-black">评估后台</h2>
-        <p className="text-muted-foreground">用于答辩展示 Agent 优化过程、Bad Case 和优化前后指标。</p>
-      </div>
-      <div className="grid gap-4 md:grid-cols-3">
-        {[
-          ["任务成功率", summary.after.average.taskSuccess, summary.delta.taskSuccess],
-          ["风格一致性", summary.after.average.styleConsistency, summary.delta.styleConsistency],
-          ["手动保护", summary.after.average.manualPreservation, summary.delta.manualPreservation]
-        ].map(([label, value, delta]) => (
-          <Card key={String(label)} className="bg-[#f6f6f3]">
-            <CardHeader>
-              <CardTitle>{label}</CardTitle>
-              <CardDescription>
-                优化后 {Number(value).toFixed(2)} / 提升 {Number(delta).toFixed(2)}
-              </CardDescription>
-            </CardHeader>
-          </Card>
-        ))}
-      </div>
-      <section className="mt-6 grid gap-4 xl:grid-cols-[minmax(0,0.95fr)_minmax(420px,1.05fr)]" aria-label="Agent 编排运行证据">
-        <Card className="bg-white">
-          <CardHeader>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <CardTitle>最近 Agent 运行</CardTitle>
-                <CardDescription>展示真实会话中的上下文读取、记忆快照和导入风格。</CardDescription>
-              </div>
-              <Badge className="bg-[#f6f6f3] text-foreground">{sessions.length} 次会话</Badge>
-            </div>
-          </CardHeader>
-          <CardContent>
-            {latestSession ? (
-              <div className="grid gap-4">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <EvidenceBlock label="上下文摘要" value={latestSession.contextSummary ?? "暂无上下文摘要"} />
-                  <EvidenceBlock label="记忆快照" value={latestSession.memorySnapshotText ?? "暂无记忆快照"} />
-                </div>
-                <div>
-                  <p className="text-xs font-black text-muted-foreground">导入风格</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {latestImportedSkillNames.length ? (
-                      latestImportedSkillNames.map((name) => (
-                        <Badge key={name} className="bg-[#f6f6f3] text-foreground">
-                          {name}
-                        </Badge>
-                      ))
-                    ) : (
-                      <span className="text-sm text-muted-foreground">本轮未导入旅行风格</span>
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <p className="text-xs font-black text-muted-foreground">最近消息</p>
-                  <div className="mt-2 grid gap-2">
-                    {latestSession.messages.slice(-4).map((message) => (
-                      <div key={`${latestSession.id}-${message.createdAt}-${message.role}`} className="rounded-2xl bg-[#f6f6f3] p-3">
-                        <p className="text-xs font-black text-muted-foreground">{message.role === "user" ? "用户" : "助手"}</p>
-                        <p className="mt-1 text-sm font-semibold leading-6">{message.content}</p>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">运行一次右侧助手后，这里会显示真实会话、偏好摘要和上下文证据。</p>
-            )}
-          </CardContent>
-        </Card>
-        <Card className="bg-[#f6f6f3]">
-          <CardHeader>
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <CardTitle>子 Agent 编排</CardTitle>
-                <CardDescription>主 Agent 将任务派发给风格、地点、交通、规划和校验 Agent；天气由画布后台服务自动补全。</CardDescription>
-              </div>
-              <Badge className="bg-white text-foreground">{latestTraces.length} 条 trace</Badge>
-            </div>
-          </CardHeader>
-          <CardContent>
-            <div className="grid gap-3 md:grid-cols-2">
-              {agentSummaries.map((agent) => (
-                <div key={agent.name} className="rounded-2xl bg-white p-4">
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="font-black">{agent.label}</p>
-                    <Badge className={cn("text-xs", agent.count > 0 ? "bg-foreground text-white" : "bg-[#f6f6f3] text-muted-foreground")}>
-                      {agent.count > 0 ? `${agent.count} 次` : "待运行"}
-                    </Badge>
-                  </div>
-                  <p className="mt-2 min-h-10 text-sm leading-5 text-muted-foreground">{agent.latestTitle}</p>
-                </div>
-              ))}
-            </div>
-            {latestTraces.length > 0 && (
-              <>
-                <Separator className="my-4" />
-                <div className="grid gap-2" aria-label="Agent trace 时间线">
-                  {latestTraces.slice(0, 8).map((trace) => (
-                    <div key={trace.id} className="grid gap-1 rounded-2xl bg-white p-3 md:grid-cols-[132px_minmax(0,1fr)] md:gap-3">
-                      <div>
-                        <p className="text-sm font-black">{agentLabel(trace.agent)}</p>
-                        <p className="text-xs text-muted-foreground">{traceTypeLabel(trace.type)}</p>
-                      </div>
-                      <div className="min-w-0">
-                        <p className="font-semibold">{trace.title}</p>
-                        <p className="mt-1 line-clamp-2 text-sm text-muted-foreground">{trace.detail}</p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </CardContent>
-        </Card>
-      </section>
-      <div className="mt-6 flex flex-col gap-3">
-        {evaluationDataset.map((item) => (
-          <Card key={item.id} className="bg-white">
-            <CardHeader>
-              <CardTitle>{item.title}</CardTitle>
-              <CardDescription>
-                {item.category} / {item.input}
-              </CardDescription>
-            </CardHeader>
-          </Card>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function EvidenceBlock({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl bg-[#f6f6f3] p-4">
-      <p className="text-xs font-black text-muted-foreground">{label}</p>
-      <p className="mt-2 text-sm font-semibold leading-6">{value}</p>
-    </div>
-  );
-}
-
-function sortAgentSessions(sessions: AgentSession[]): AgentSession[] {
-  return [...sessions].sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt));
-}
 
 function sortAgentTraces(traces: AgentTraceEvent[]): AgentTraceEvent[] {
   return [...traces].sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
-}
-
-function summarizeAgentTraces(traces: AgentTraceEvent[]): Array<{ name: AgentTraceEvent["agent"]; label: string; count: number; latestTitle: string }> {
-  const agents: AgentTraceEvent["agent"][] = [
-    "MainAgent",
-    "StyleAgent",
-    "PlannerAgent",
-    "AttractionAgent",
-    "TransportAgent",
-    "ContextAgent",
-    "CriticAgent"
-  ];
-  return agents.map((agent) => {
-    const agentTraces = traces.filter((trace) => trace.agent === agent);
-    return {
-      name: agent,
-      label: agentLabel(agent),
-      count: agentTraces.length,
-      latestTitle: agentTraces.at(-1)?.title ?? "等待真实运行数据"
-    };
-  });
 }
 
 function agentLabel(agent: AgentTraceEvent["agent"]): string {

@@ -53,7 +53,7 @@ describe("travel workbench API", () => {
     vi.unstubAllEnvs();
   });
 
-  it("serves seeded itineraries, skills, recommendations, and evaluation summaries", async () => {
+  it("serves seeded itineraries, skills, and recommendations", async () => {
     const db = createInMemoryDatabase();
     const app = createApp({ db });
 
@@ -74,9 +74,6 @@ describe("travel workbench API", () => {
       .query({ destination: "杭州", preferences: "慢节奏 咖啡", currentText: "想要 citywalk" })
       .expect(200);
     expect(recommendations.body.items[0].skill.id).toBe("skill-slow-citywalk");
-
-    const evaluation = await request(app).get("/api/evaluation/summary").expect(200);
-    expect(evaluation.body.after.average.taskSuccess).toBeGreaterThan(0);
   });
 
   it("creates an itinerary and supports manual activity editing", async () => {

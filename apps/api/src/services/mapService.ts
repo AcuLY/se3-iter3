@@ -18,48 +18,41 @@ export type PoiResult = {
   averageCostCny?: number;
   photos?: Array<{ title?: string; url: string }>;
   location: { lng: number; lat: number };
-  source: "amap" | "mock";
+  source: "amap";
 };
 
 export class MapService {
   async searchPoi(keywords: string, city = "杭州"): Promise<PoiResult[]> {
-    const key = process.env.AMAP_WEB_SERVICE_KEY;
-    if (key) {
-      try {
-        const url = new URL("https://restapi.amap.com/v3/place/text");
-        url.searchParams.set("key", key);
-        url.searchParams.set("keywords", keywords);
-        url.searchParams.set("city", city);
-        url.searchParams.set("offset", "20");
-        url.searchParams.set("extensions", "all");
-        const data = await fetchAmap<AmapPoiResponse>(url);
-        if (data.status === "1" && Array.isArray(data.pois) && data.pois.length > 0) {
-          const items = data.pois.flatMap((poi) => {
-            const location = parseLngLat(poi.location);
-            if (!location) return [];
-            return [{
-              id: poi.id,
-              name: poi.name,
-              address: typeof poi.address === "string" ? poi.address : "",
-              city: poi.cityname || city,
-              district: poi.adname,
-              type: poi.type,
-              typeCode: poi.typecode,
-              phone: normalizeText(poi.tel),
-              openingHours: normalizeText(poi.biz_ext?.opentime),
-              averageCostCny: parseCost(poi.biz_ext?.cost),
-              photos: normalizePhotos(poi.photos),
-              location,
-              source: "amap" as const
-            }];
-          });
-          if (items.length > 0) return items;
-        }
-      } catch {
-        return mockPoi(keywords, city);
-      }
+    const key = requireAmapKey();
+    const url = new URL("https://restapi.amap.com/v3/place/text");
+    url.searchParams.set("key", key);
+    url.searchParams.set("keywords", keywords);
+    url.searchParams.set("city", city);
+    url.searchParams.set("offset", "20");
+    url.searchParams.set("extensions", "all");
+    const data = await fetchAmap<AmapPoiResponse>(url);
+    if (data.status !== "1" || !Array.isArray(data.pois)) {
+      throw new Error("Amap POI search returned an unsuccessful response");
     }
-    return mockPoi(keywords, city);
+    return data.pois.flatMap((poi) => {
+      const location = parseLngLat(poi.location);
+      if (!location) return [];
+      return [{
+        id: poi.id,
+        name: poi.name,
+        address: typeof poi.address === "string" ? poi.address : "",
+        city: poi.cityname || city,
+        district: poi.adname,
+        type: poi.type,
+        typeCode: poi.typecode,
+        phone: normalizeText(poi.tel),
+        openingHours: normalizeText(poi.biz_ext?.opentime),
+        averageCostCny: parseCost(poi.biz_ext?.cost),
+        photos: normalizePhotos(poi.photos),
+        location,
+        source: "amap" as const
+      }];
+    });
   }
 
   async route(
@@ -68,110 +61,60 @@ export class MapService {
     mode: MapRouteMode = "walking",
     options: RouteRequestOptions = {}
   ): Promise<RouteSummary> {
-    const key = process.env.AMAP_WEB_SERVICE_KEY;
-    if (key) {
-      try {
-        const url = routeUrl(mode);
-        url.searchParams.set("key", key);
-        url.searchParams.set("origin", from);
-        url.searchParams.set("destination", to);
-        if (mode === "transit") {
-          const originCity = options.originCity?.trim();
-          const destinationCity = options.destinationCity?.trim();
-          if (originCity && destinationCity && originCity !== destinationCity) {
-            // Intercity transit (e.g. 苏州→上海) requires both city codes so Amap
-            // returns high-speed rail / coach options instead of urban-only buses.
-            url.searchParams.set("city", originCity);
-            url.searchParams.set("cityd", destinationCity);
-          } else {
-            url.searchParams.set("city", originCity || destinationCity || "全国");
-          }
-        }
-        const data = await fetchAmap<AmapRouteResponse>(url);
-        const route = normalizeAmapRoute(data, mode, from, to);
-        if (route) return route;
-      } catch {
-        return mockRoute(from, to, mode);
+    const key = requireAmapKey();
+    const url = routeUrl(mode);
+    url.searchParams.set("key", key);
+    url.searchParams.set("origin", from);
+    url.searchParams.set("destination", to);
+    if (mode === "transit") {
+      const originCity = options.originCity?.trim();
+      const destinationCity = options.destinationCity?.trim();
+      if (originCity && destinationCity && originCity !== destinationCity) {
+        // Intercity transit (e.g. 苏州→上海) requires both city codes so Amap
+        // returns high-speed rail / coach options instead of urban-only buses.
+        url.searchParams.set("city", originCity);
+        url.searchParams.set("cityd", destinationCity);
+      } else {
+        url.searchParams.set("city", originCity || destinationCity || "全国");
       }
     }
-    return mockRoute(from, to, mode);
+    const data = await fetchAmap<AmapRouteResponse>(url);
+    const route = normalizeAmapRoute(data, mode, from, to);
+    if (!route) {
+      throw new Error(`Amap route planning returned no usable result for mode=${mode}`);
+    }
+    return route;
   }
 
   async weather(city: string, date: string): Promise<WeatherSummary> {
-    const key = process.env.AMAP_WEB_SERVICE_KEY;
-    if (key) {
-      try {
-        const url = new URL("https://restapi.amap.com/v3/weather/weatherInfo");
-        url.searchParams.set("key", key);
-        url.searchParams.set("city", city);
-        url.searchParams.set("extensions", "all");
-        const data = await fetchAmap<AmapWeatherResponse>(url);
-        const forecast = normalizeAmapForecast(data, city, date);
-        if (forecast) return forecast;
-        const live = data.lives?.[0];
-        if (data.status === "1" && live) {
-          return {
-            city: live.city || city,
-            date,
-            weather: live.weather,
-            temperature: `${live.temperature} C`,
-            source: "amap"
-          };
-        }
-      } catch {
-        return mockWeather(city, date);
-      }
+    const key = requireAmapKey();
+    const url = new URL("https://restapi.amap.com/v3/weather/weatherInfo");
+    url.searchParams.set("key", key);
+    url.searchParams.set("city", city);
+    url.searchParams.set("extensions", "all");
+    const data = await fetchAmap<AmapWeatherResponse>(url);
+    const forecast = normalizeAmapForecast(data, city, date);
+    if (forecast) return forecast;
+    const live = data.lives?.[0];
+    if (data.status === "1" && live) {
+      return {
+        city: live.city || city,
+        date,
+        weather: live.weather,
+        temperature: `${live.temperature} C`,
+        source: "amap"
+      };
     }
-    return mockWeather(city, date);
+    throw new Error("Amap weather API returned no usable forecast");
   }
 }
 
-function mockPoi(keywords: string, city: string): PoiResult[] {
-  return [
-    {
-      id: `mock-${keywords}`,
-      name: keywords,
-      address: `${city}市核心区域`,
-      city,
-      district: `${city}市`,
-      type: inferMockPoiType(keywords),
-      openingHours: inferMockOpeningHours(keywords),
-      averageCostCny: inferMockAverageCost(keywords),
-      location: { lng: 120.1551, lat: 30.2741 },
-      source: "mock"
-    },
-    {
-      id: `mock-${keywords}-2`,
-      name: `${keywords}周边`,
-      address: `${city}市步行可达区域`,
-      city,
-      district: `${city}市`,
-      type: "周边地点",
-      openingHours: "10:00-18:00",
-      location: { lng: 120.16, lat: 30.27 },
-      source: "mock"
-    }
-  ];
-}
-
-function inferMockPoiType(keywords: string): string {
-  if (/咖啡|餐厅|饭店|美食|茶/.test(keywords)) return "餐饮服务";
-  if (/酒店|民宿|住宿/.test(keywords)) return "住宿服务";
-  if (/车站|机场|码头|地铁/.test(keywords)) return "交通设施";
-  return "风景名胜";
-}
-
-function inferMockOpeningHours(keywords: string): string | undefined {
-  if (/车站|机场|码头|地铁/.test(keywords)) return undefined;
-  if (/咖啡|餐厅|饭店|美食|茶/.test(keywords)) return "10:00-22:00";
-  return "09:00-17:30";
-}
-
-function inferMockAverageCost(keywords: string): number | undefined {
-  if (/咖啡|茶/.test(keywords)) return 45;
-  if (/餐厅|饭店|美食/.test(keywords)) return 90;
-  if (/酒店|民宿|住宿/.test(keywords)) return 480;
-  return undefined;
+function requireAmapKey(): string {
+  const key = process.env.AMAP_WEB_SERVICE_KEY;
+  if (!key) {
+    throw new Error("AMAP_WEB_SERVICE_KEY is required");
+  }
+  return key;
 }
 
 function normalizeText(value: unknown): string | undefined {
@@ -205,68 +148,6 @@ async function fetchAmap<T>(url: URL): Promise<T> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Amap request failed: ${response.status}`);
   return (await response.json()) as T;
-}
-
-function mockRoute(from: string, to: string, mode: MapRouteMode): RouteSummary {
-  const baseMinutes: Record<MapRouteMode, number> = {
-    walking: 18,
-    transit: 24,
-    driving: 12,
-    cycling: 10
-  };
-  const summaries: Record<MapRouteMode, string> = {
-    walking: "步行路线建议",
-    transit: "公交/地铁换乘建议",
-    driving: "驾车路线建议",
-    cycling: "骑行路线建议"
-  };
-  const distanceMeters = mode === "walking" ? 1300 : 3600;
-  const durationMinutes = baseMinutes[mode];
-  const polyline = [
-    { lng: 120.1551, lat: 30.2741 },
-    { lng: 120.16, lat: 30.27 }
-  ];
-  return {
-    from,
-    to,
-    mode,
-    distanceMeters,
-    durationMinutes,
-    summary: summaries[mode],
-    polyline,
-    steps: [
-      {
-        instruction: `${routeActionLabel(mode)}前往${to}`,
-        mode,
-        distanceMeters,
-        durationMinutes,
-        polyline
-      }
-    ],
-    source: "mock",
-    status: "estimated",
-    fallbackReason: "实时路线不可用时的参考值"
-  };
-}
-
-function routeActionLabel(mode: MapRouteMode): string {
-  const labels: Record<MapRouteMode, string> = {
-    walking: "步行",
-    transit: "公交/地铁",
-    driving: "驾车",
-    cycling: "骑行"
-  };
-  return labels[mode];
-}
-
-function mockWeather(city: string, date: string): WeatherSummary {
-  return {
-    city,
-    date,
-    weather: "多云，适合户外步行",
-    temperature: "24-30 C",
-    source: "mock"
-  };
 }
 
 function routeUrl(mode: MapRouteMode): URL {

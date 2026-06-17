@@ -1063,7 +1063,7 @@ export class AgentService {
       routeStatus: route.status,
       summary: route.summary,
       polyline: route.polyline ?? [],
-      steps: localizeRouteSteps(route.steps ?? [], route.source, route.mode, toName)
+      steps: localizeRouteSteps(route.steps ?? [])
     });
     traces.push(
       this.trace(
@@ -1126,7 +1126,7 @@ export class AgentService {
       routeStatus: selected.status,
       summary: selected.summary,
       polyline: selected.polyline ?? [],
-      steps: localizeRouteSteps(selected.steps ?? [], selected.source, selected.mode, toName)
+      steps: localizeRouteSteps(selected.steps ?? [])
     });
     traces.push(
       this.trace(
@@ -1300,35 +1300,6 @@ export class AgentService {
       )
     );
     diff.push(`已顺延活动：${activityDisplayName(toActivity)} 到 ${conflict.estimatedArrivalTime}`);
-    return saved;
-  }
-
-  private applyDeterministicWeather(
-    itinerary: TravelItinerary,
-    traces: AgentTraceEvent[],
-    sessionId: string,
-    diff: string[]
-  ): TravelItinerary {
-    const day = itinerary.days[0];
-    if (!day) return itinerary;
-    const weather = {
-      city: itinerary.destination,
-      date: day.date,
-      weather: "多云，适合户外步行",
-      temperature: "24-30 C",
-      source: "mock" as const
-    };
-    if (
-      day.weather?.weather === weather.weather &&
-      day.weather.temperature === weather.temperature &&
-      day.weather.source === weather.source
-    ) {
-      traces.push(this.trace(sessionId, "WeatherAgent", "message", "确认天气摘要", `${day.title} 已有天气摘要`));
-      return itinerary;
-    }
-    const saved = this.itineraries.setDayWeather(itinerary.id, day.id, weather, "agent");
-    traces.push(this.trace(sessionId, "WeatherAgent", "state_patch", "写入天气摘要", `${day.title} ${weather.weather}`));
-    diff.push(`已更新天气：Day 1 ${weather.weather}`);
     return saved;
   }
 
@@ -2501,30 +2472,8 @@ function clockValueToMinutes(value: string | undefined): number | undefined {
   return hours * 60 + mins;
 }
 
-function localizeRouteSteps(
-  steps: RouteStep[],
-  source: "amap" | "mock",
-  mode: MapRouteMode,
-  toTitle: string
-): RouteStep[] {
-  const normalized = steps.map((step) => ({ ...step, polyline: step.polyline ?? [] }));
-  if (source !== "mock" || normalized.length !== 1) return normalized;
-  return [
-    {
-      ...normalized[0]!,
-      instruction: `${routeActionLabel(mode)}前往${toTitle}`
-    }
-  ];
-}
-
-function routeActionLabel(mode: MapRouteMode): string {
-  const labels: Record<MapRouteMode, string> = {
-    walking: "步行",
-    transit: "公交/地铁",
-    driving: "驾车",
-    cycling: "骑行"
-  };
-  return labels[mode];
+function localizeRouteSteps(steps: RouteStep[]): RouteStep[] {
+  return steps.map((step) => ({ ...step, polyline: step.polyline ?? [] }));
 }
 
 function placeFromPoi(poi: PoiResult): Place {

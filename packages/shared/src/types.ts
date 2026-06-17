@@ -83,7 +83,7 @@ export const TransportLegSchema = z.object({
   distanceMeters: z.number().nonnegative().default(0),
   durationMinutes: z.number().nonnegative().default(0),
   costCny: z.number().nonnegative().optional(),
-  provider: z.enum(["amap", "manual", "mock"]).default("manual"),
+  provider: z.enum(["amap", "manual"]).default("manual"),
   routeStatus: RouteStatusSchema.default("manual"),
   summary: z.string().optional(),
   note: z.string().optional(),
@@ -100,7 +100,7 @@ export const WeatherSummarySchema = z.object({
   date: z.string(),
   weather: z.string(),
   temperature: z.string(),
-  source: z.enum(["amap", "mock"])
+  source: z.enum(["amap"])
 });
 
 export type WeatherSummary = z.infer<typeof WeatherSummarySchema>;
@@ -348,62 +348,7 @@ export type RouteSummary = {
   summary?: string;
   polyline?: Coordinates[];
   steps?: RouteStep[];
-  source: "amap" | "mock";
+  source: "amap";
   status: Extract<RouteStatus, "planned" | "estimated" | "failed">;
   fallbackReason?: string;
-};
-
-export type EvaluationCategory =
-  | "normal_planning"
-  | "skill_fusion"
-  | "skill_extraction_internal"
-  | "skill_extraction_external"
-  | "manual_replan"
-  | "intent_routing"
-  | "skill_script_success"
-  | "skill_script_failure";
-
-export type EvaluationExpected = {
-  requiredKeywords: string[];
-  styleKeywords: string[];
-  minDays: number;
-  preserveActivityIds: string[];
-  requiredToolNames: AgentName[];
-};
-
-export type EvaluationOutput = {
-  itineraryText: string;
-  days: number;
-  preservedActivityIds: string[];
-  toolCalls: AgentName[];
-  scriptErrors: string[];
-};
-
-export type EvaluationCase = {
-  id: string;
-  title: string;
-  category: EvaluationCategory;
-  input: string;
-  expected: EvaluationExpected;
-  output: EvaluationOutput;
-};
-
-export type EvaluationScore = {
-  taskSuccess: number;
-  requirementCoverage: number;
-  styleConsistency: number;
-  structureCompleteness: number;
-  manualPreservation: number;
-  toolSuccess: number;
-};
-
-export type EvaluationSummary = {
-  count: number;
-  average: EvaluationScore;
-};
-
-export type OptimizationComparison = {
-  before: EvaluationSummary;
-  after: EvaluationSummary;
-  delta: EvaluationScore;
 };

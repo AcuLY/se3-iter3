@@ -313,7 +313,7 @@ describe("MapService", () => {
     expect(route.summary).toContain("G7203次高铁");
   });
 
-  it("falls back to the national transit search when no destination city is provided", async () => {
+  it("uses the national transit search when no destination city is provided and surfaces empty results as an error", async () => {
     vi.stubEnv("AMAP_WEB_SERVICE_KEY", "amap-test-key");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
@@ -324,7 +324,9 @@ describe("MapService", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const service = new MapService();
-    await service.route("120.141,30.259", "120.165,30.255", "transit");
+    await expect(service.route("120.141,30.259", "120.165,30.255", "transit")).rejects.toThrow(
+      "Amap route planning returned no usable result"
+    );
   });
 
   it("uses Amap v4 bicycling routes instead of falling back to local estimates", async () => {

@@ -1154,7 +1154,7 @@ describe("Travel Skill Agent frontend", () => {
       mode: "driving",
       distanceMeters: 164000,
       durationMinutes: 118,
-      provider: "mock",
+      provider: "manual",
       routeStatus: "estimated",
       summary: "跨城到首站"
     });
@@ -1949,7 +1949,7 @@ describe("Travel Skill Agent frontend", () => {
                         mode: "walking",
                         distanceMeters: 0,
                         durationMinutes: 0,
-                        provider: "mock",
+                        provider: "manual",
                         routeStatus: "failed",
                         failureReason: "高德未返回可用路线，请补全地点或手动填写交通。",
                         manualOverride: false,
@@ -2432,134 +2432,6 @@ describe("Travel Skill Agent frontend", () => {
     await user.click(screen.getByRole("button", { name: "编辑湖滨咖啡" }));
     expect(screen.getByLabelText("湖滨咖啡 的开始时间")).toHaveValue("11:45");
   });
-
-  it("shows agent orchestration evidence in the evaluation backend", async () => {
-    const seed = createSeedItinerary();
-    const skills = createSeedSkills();
-    window.history.replaceState(null, "", "#/evaluation");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url.endsWith("/api/itineraries")) {
-          return new Response(JSON.stringify({ items: [seed] }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          });
-        }
-        if (url.includes("/api/skills")) {
-          return new Response(JSON.stringify({ items: skills }), {
-            status: 200,
-            headers: { "Content-Type": "application/json" }
-          });
-        }
-        if (url.includes("/api/agent/sessions")) {
-          return new Response(
-            JSON.stringify({
-              items: [
-                {
-                  id: "session-agent-evidence",
-                  itineraryId: seed.id,
-                  importedSkillIds: ["skill-slow-citywalk"],
-                  contextSummary: "用户请求：补 Day 2 室内活动；当前行程：杭州三日松弛游",
-                  memorySnapshotText: "用户喜欢慢节奏\n用户喜欢咖啡\n尽量少走路",
-                  messages: [
-                    { id: "msg-u", role: "user", content: "补 Day 2 室内活动", createdAt: "2026-06-15T10:00:00.000Z" },
-                    { id: "msg-a", role: "assistant", content: "已更新行程。", createdAt: "2026-06-15T10:00:02.000Z" }
-                  ],
-                  traces: [],
-                  createdAt: "2026-06-15T10:00:00.000Z",
-                  updatedAt: "2026-06-15T10:00:02.000Z"
-                }
-              ]
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        if (url.includes("/api/agent/traces")) {
-          return new Response(
-            JSON.stringify({
-              items: [
-                {
-                  id: "trace-main",
-                  sessionId: "session-agent-evidence",
-                  agent: "MainAgent",
-                  type: "message",
-                  title: "读取行程上下文",
-                  detail: "杭州三日松弛游 / 3 天",
-                  createdAt: "2026-06-15T10:00:00.000Z"
-                },
-                {
-                  id: "trace-style",
-                  sessionId: "session-agent-evidence",
-                  agent: "StyleAgent",
-                  type: "tool_call",
-                  title: "读取已导入 Skill",
-                  detail: "慢节奏街区漫步",
-                  createdAt: "2026-06-15T10:00:01.000Z"
-                },
-                {
-                  id: "trace-weather",
-                  sessionId: "session-agent-evidence",
-                  agent: "WeatherAgent",
-                  type: "tool_call",
-                  title: "检查天气约束",
-                  detail: "高德天气返回多云",
-                  createdAt: "2026-06-15T10:00:02.000Z"
-                },
-                {
-                  id: "trace-transport",
-                  sessionId: "session-agent-evidence",
-                  agent: "TransportAgent",
-                  type: "tool_call",
-                  title: "检查路线可行性",
-                  detail: "计算相邻活动路线",
-                  createdAt: "2026-06-15T10:00:03.000Z"
-                },
-                {
-                  id: "trace-planner",
-                  sessionId: "session-agent-evidence",
-                  agent: "PlannerAgent",
-                  type: "state_patch",
-                  title: "生成结构化行程补丁",
-                  detail: "补全空白时段",
-                  createdAt: "2026-06-15T10:00:04.000Z"
-                },
-                {
-                  id: "trace-critic",
-                  sessionId: "session-agent-evidence",
-                  agent: "CriticAgent",
-                  type: "handoff",
-                  title: "检查需求覆盖",
-                  detail: "确认慢节奏和手动编辑保护",
-                  createdAt: "2026-06-15T10:00:05.000Z"
-                }
-              ]
-            }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
-          );
-        }
-        return new Response("Not found", { status: 404 });
-      })
-    );
-
-    render(<App />);
-
-    expect(await screen.findByRole("heading", { name: "评估后台" })).toBeInTheDocument();
-    expect(await screen.findByText("最近 Agent 运行")).toBeInTheDocument();
-    expect(screen.getByText("用户请求：补 Day 2 室内活动；当前行程：杭州三日松弛游")).toBeInTheDocument();
-    expect(screen.getByText("记忆快照")).toBeInTheDocument();
-    expect(screen.getByText((content) => content.includes("用户喜欢慢节奏") && content.includes("尽量少走路"))).toBeInTheDocument();
-    expect(screen.getAllByText("慢节奏街区漫步").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("主 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("风格 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("天气 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("交通 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("规划 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("校验 Agent").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("检查路线可行性").length).toBeGreaterThan(0);
-  });
-
   it("opens the skill plaza and shows recommendations", async () => {
     const user = userEvent.setup();
     render(<App />);
