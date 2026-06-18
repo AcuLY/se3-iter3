@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1420" height="520" viewBox="0 0 1420 520" role="img" aria-label="Journey Agent 工作流程主体图">
+  <defs>
+    <filter id="softShadow" x="-10%" y="-16%" width="120%" height="132%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#5a0012" flood-opacity="0.12" />
+    </filter>
+    <filter id="tinyShadow" x="-8%" y="-10%" width="116%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#5a0012" flood-opacity="0.1" />
+    </filter>
+  </defs>
+
+  <g opacity="0.45">
+    <path d="M76 260 C182 110 350 108 454 222 S690 396 812 250" fill="none" stroke="#f4a3aa" stroke-width="26" stroke-linecap="round" />
+    <path d="M76 260 C182 110 350 108 454 222 S690 396 812 250" fill="none" stroke="#ffffff" stroke-width="12" stroke-linecap="round" stroke-dasharray="18 20" opacity="0.72" />
+  </g>
+
+  <g font-family="PingFang SC, Microsoft YaHei, Arial, sans-serif">
+    <g filter="url(#softShadow)">
+      <rect x="28" y="54" width="300" height="170" rx="30" fill="#fff7f8" />
+      <circle cx="78" cy="104" r="30" fill="#e60023" />
+      <text x="78" y="115" fill="#ffffff" font-size="23" font-weight="900" text-anchor="middle">01</text>
+      <text x="120" y="104" fill="#161612" font-size="34" font-weight="900">输入需求</text>
+      <text x="58" y="154" fill="#55554c" font-size="22" font-weight="690">目的地、日期、预算</text>
+      <text x="58" y="186" fill="#55554c" font-size="22" font-weight="690">和临时变化先进对话</text>
+    </g>
+
+    <g filter="url(#softShadow)">
+      <rect x="354" y="192" width="300" height="170" rx="30" fill="#fff7f8" />
+      <circle cx="404" cy="242" r="30" fill="#e60023" />
+      <text x="404" y="253" fill="#ffffff" font-size="23" font-weight="900" text-anchor="middle">02</text>
+      <text x="446" y="242" fill="#161612" font-size="34" font-weight="900">工具执行</text>
+      <text x="384" y="292" fill="#55554c" font-size="22" font-weight="690">地点、路线、天气</text>
+      <text x="384" y="324" fill="#55554c" font-size="22" font-weight="690">转成结构化变更</text>
+    </g>
+
+    <g filter="url(#softShadow)">
+      <rect x="680" y="54" width="300" height="170" rx="30" fill="#fff7f8" />
+      <circle cx="730" cy="104" r="30" fill="#e60023" />
+      <text x="730" y="115" fill="#ffffff" font-size="23" font-weight="900" text-anchor="middle">03</text>
+      <text x="772" y="104" fill="#161612" font-size="34" font-weight="900">画布确认</text>
+      <text x="710" y="154" fill="#55554c" font-size="22" font-weight="690">用户看到改动</text>
+      <text x="710" y="186" fill="#55554c" font-size="22" font-weight="690">继续编辑、撤销或导出</text>
+    </g>
+
+    <g filter="url(#softShadow)">
+      <rect x="680" y="292" width="300" height="170" rx="30" fill="#fff7f8" />
+      <circle cx="730" cy="342" r="30" fill="#e60023" />
+      <text x="730" y="353" fill="#ffffff" font-size="23" font-weight="900" text-anchor="middle">04</text>
+      <text x="772" y="342" fill="#161612" font-size="34" font-weight="900">经验留存</text>
+      <text x="710" y="392" fill="#55554c" font-size="22" font-weight="690">稳定偏好写入记忆</text>
+      <text x="710" y="424" fill="#55554c" font-size="22" font-weight="690">方法保存成 Skill</text>
+    </g>
+
+    <g opacity="0.95">
+      <path d="M331 139 C374 139 367 242 354 256" fill="none" stroke="#e60023" stroke-width="4" stroke-linecap="round" stroke-dasharray="9 10" />
+      <path d="M656 270 C700 272 673 139 680 139" fill="none" stroke="#e60023" stroke-width="4" stroke-linecap="round" stroke-dasharray="9 10" />
+      <path d="M831 226 L831 286" fill="none" stroke="#e60023" stroke-width="4" stroke-linecap="round" stroke-dasharray="9 10" />
+      <circle cx="354" cy="256" r="8" fill="#e60023" />
+      <circle cx="680" cy="139" r="8" fill="#e60023" />
+      <circle cx="831" cy="286" r="8" fill="#e60023" />
+    </g>
+
+    <g filter="url(#tinyShadow)">
+      <rect x="1040" y="64" width="348" height="106" rx="26" fill="#e60023" />
+      <text x="1082" y="116" fill="#ffffff" font-size="34" font-weight="900">画布</text>
+      <text x="1164" y="116" fill="#ffffff" fill-opacity="0.88" font-size="20" font-weight="760">还能继续改的旅行计划</text>
+    </g>
+    <g filter="url(#tinyShadow)">
+      <rect x="1040" y="207" width="348" height="106" rx="26" fill="#153c29" />
+      <text x="1082" y="259" fill="#ffffff" font-size="34" font-weight="900">记忆</text>
+      <text x="1164" y="259" fill="#ffffff" fill-opacity="0.88" font-size="20" font-weight="760">跨对话稳定偏好</text>
+    </g>
+    <g filter="url(#tinyShadow)">
+      <rect x="1040" y="350" width="348" height="106" rx="26" fill="#e60023" />
+      <text x="1082" y="402" fill="#ffffff" font-size="34" font-weight="900">Skill</text>
+      <text x="1180" y="402" fill="#ffffff" fill-opacity="0.88" font-size="20" font-weight="760">可分享的规划方法</text>
+    </g>
+  </g>
+</svg>

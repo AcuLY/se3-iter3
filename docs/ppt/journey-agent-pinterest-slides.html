@@ -1,0 +1,2886 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Journey Agent 答辩幻灯片</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --red: #e60023;
+        --red-bg: #c83c4f;
+        --red-dark: #bd001d;
+        --ink: #161612;
+        --ink-soft: #34342e;
+        --body: #55554c;
+        --muted: #77776d;
+        --line: #e4e2dc;
+        --paper: #ffffff;
+        --soft: #f6f5f1;
+        --soft-strong: #eeece5;
+        --green: #153c29;
+        --green-soft: #dcf4e2;
+        --blue: #335cff;
+        --stage-w: 1600px;
+        --stage-h: 900px;
+        --stage-scale: 1;
+        --font: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", "Hiragino Sans GB", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: visible;
+        background: #ebeae5;
+        color: var(--ink);
+        font-family: var(--font);
+        -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+      }
+
+      body {
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      button {
+        font: inherit;
+        touch-action: manipulation;
+      }
+
+      .skip-link {
+        position: fixed;
+        left: 18px;
+        top: 18px;
+        z-index: 100;
+        border-radius: 999px;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 10px 16px;
+        transform: translateY(-80px);
+      }
+
+      .skip-link:focus-visible {
+        transform: translateY(0);
+      }
+
+      .viewport {
+        position: fixed;
+        inset: 0;
+        overflow: hidden;
+      }
+
+      .stage {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: var(--stage-w);
+        height: var(--stage-h);
+        overflow: hidden;
+        background: var(--paper);
+        box-shadow: 0 24px 80px rgba(0, 0, 0, 0.16);
+        transform: scale(var(--stage-scale));
+        transform-origin: left top;
+      }
+
+      .slide {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        grid-template-rows: auto 1fr;
+        gap: 28px;
+        padding: 60px 76px 96px;
+        overflow: hidden;
+        background: var(--paper);
+        opacity: 0;
+        pointer-events: none;
+        transform: translateY(10px);
+        transition:
+          opacity 180ms ease,
+          transform 240ms ease;
+        visibility: hidden;
+      }
+
+      .slide.is-active {
+        opacity: 1;
+        pointer-events: auto;
+        transform: translateY(0);
+        visibility: visible;
+      }
+
+      .slide.soft {
+        background: var(--soft);
+      }
+
+      .slide.red {
+        background: var(--red-bg);
+        color: var(--paper);
+      }
+
+      .slide::after {
+        content: attr(data-section);
+        position: absolute;
+        right: 54px;
+        bottom: 28px;
+        color: rgba(22, 22, 18, 0.42);
+        font-size: 26px;
+        font-weight: 800;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .slide.red::after {
+        color: rgba(255, 255, 255, 0.66);
+      }
+
+      h1,
+      h2,
+      h3,
+      p,
+      figure {
+        margin: 0;
+      }
+
+      h1,
+      h2,
+      h3 {
+        color: inherit;
+        font-weight: 850;
+        text-wrap: balance;
+        word-break: keep-all;
+        overflow-wrap: normal;
+      }
+
+      h1 {
+        max-width: 610px;
+        font-size: 58px;
+        line-height: 1.16;
+      }
+
+      h2 {
+        max-width: 1000px;
+        font-size: 44px;
+        line-height: 1.32;
+      }
+
+      h3 {
+        font-size: 28px;
+        line-height: 1.35;
+      }
+
+      .phrase {
+        white-space: nowrap;
+      }
+
+      .label,
+      .chip,
+      .shot-label,
+      .button,
+      .num,
+      .zone-mark,
+      .case-label,
+      .dot,
+      .tag,
+      .thread-head span,
+      strong {
+        white-space: nowrap;
+      }
+
+      .label {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        gap: 10px;
+        border-radius: 999px;
+        background: var(--soft-strong);
+        color: var(--ink-soft);
+        padding: 10px 16px;
+        font-size: 26px;
+        font-weight: 850;
+        line-height: 1;
+      }
+
+      .label::before {
+        content: "";
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: var(--red);
+      }
+
+      .red .label {
+        background: rgba(255, 255, 255, 0.17);
+        color: var(--paper);
+      }
+
+      .red .label::before {
+        background: var(--paper);
+      }
+
+      .lead {
+        max-width: 620px;
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 650;
+        line-height: 1.48;
+        text-wrap: pretty;
+      }
+
+      .red .lead {
+        color: rgba(255, 255, 255, 0.9);
+      }
+
+      .copy {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 620;
+        line-height: 1.34;
+        text-wrap: pretty;
+      }
+
+      .red .copy {
+        color: rgba(255, 255, 255, 0.86);
+      }
+
+      .header {
+        display: grid;
+        gap: 16px;
+        align-content: start;
+      }
+
+      .body {
+        min-height: 0;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 0.92fr 1.08fr;
+        gap: 52px;
+        align-items: center;
+        min-height: 0;
+      }
+
+      .split.reverse {
+        grid-template-columns: 1.08fr 0.92fr;
+      }
+
+      .stack {
+        display: grid;
+        gap: 22px;
+        align-content: center;
+        min-width: 0;
+      }
+
+      .hero {
+        grid-template-columns: 0.86fr 1.14fr;
+      }
+
+      .cover-slide {
+        grid-template-rows: 1fr;
+        padding-left: 96px;
+      }
+
+      .cover-slide .hero {
+        align-self: stretch;
+        grid-template-columns: 0.86fr 1.14fr;
+        gap: 34px;
+      }
+
+      .hero h1 {
+        max-width: 640px;
+      }
+
+      .cover-slide h1 {
+        max-width: 720px;
+      }
+
+      .hero .lead {
+        max-width: 660px;
+      }
+
+      .button-row,
+      .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 11px;
+        align-items: center;
+      }
+
+      .button,
+      .chip {
+        display: inline-flex;
+        min-height: 50px;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 999px;
+        padding: 10px 18px;
+        font-size: 26px;
+        font-weight: 850;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .button {
+        background: var(--paper);
+        color: var(--red);
+        cursor: pointer;
+        transition:
+          background-color 160ms ease,
+          color 160ms ease,
+          opacity 160ms ease;
+      }
+
+      .button:hover {
+        background: #ffe5eb;
+      }
+
+      .chip {
+        background: var(--soft-strong);
+        color: var(--ink-soft);
+      }
+
+      .red .chip {
+        background: rgba(255, 255, 255, 0.16);
+        color: var(--paper);
+      }
+
+      .shot {
+        position: relative;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 12px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: var(--paper);
+        padding: 14px;
+        box-shadow: 0 18px 48px rgba(30, 30, 20, 0.12);
+      }
+
+      .shot img {
+        display: block;
+        width: 100%;
+        height: 100%;
+        min-height: 0;
+        object-fit: contain;
+        border-radius: 17px;
+      }
+
+      .shot-label {
+        display: inline-flex;
+        width: fit-content;
+        align-items: center;
+        border-radius: 999px;
+        background: var(--soft);
+        color: #707070;
+        padding: 10px 16px;
+        font-size: 26px;
+        font-weight: 850;
+      }
+
+      .hero-shot {
+        height: 640px;
+      }
+
+      .large-shot {
+        width: 1080px;
+        height: 620px;
+        margin: 0 auto;
+      }
+
+      .spotlight-slide {
+        grid-template-rows: 1fr;
+        padding: 50px 62px 96px;
+      }
+
+      .spotlight-layout {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) 310px;
+        gap: 28px;
+        height: 100%;
+        align-items: center;
+      }
+
+      .spotlight-shot {
+        height: 704px;
+      }
+
+      .spotlight-shot img {
+        object-fit: contain;
+      }
+
+      .itinerary-spotlight-layout {
+        grid-template-columns: 780px minmax(0, 1fr);
+        gap: 52px;
+      }
+
+      .itinerary-spotlight-layout .spotlight-shot {
+        height: 754px;
+      }
+
+      .itinerary-spotlight-layout .spotlight-copy h2 {
+        max-width: 520px;
+      }
+
+      .spotlight-copy {
+        display: grid;
+        gap: 18px;
+        align-content: center;
+        min-width: 0;
+      }
+
+      .spotlight-copy h2 {
+        max-width: 310px;
+        font-size: 40px;
+        line-height: 1.22;
+      }
+
+      .spotlight-card {
+        display: grid;
+        gap: 8px;
+        border-radius: 22px;
+        background: var(--soft);
+        padding: 18px 20px;
+      }
+
+      .spotlight-card strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .spotlight-card span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.38;
+      }
+
+      .overview-canvas-grid,
+      .agent-detail-grid {
+        display: grid;
+        gap: 26px;
+        align-items: stretch;
+      }
+
+      .overview-canvas-grid {
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 18px;
+      }
+
+      .agent-detail-grid {
+        grid-template-columns: minmax(0, 1fr) 560px;
+        gap: 42px;
+        height: 100%;
+      }
+
+      .canvas-focus-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 22px;
+        min-height: 0;
+      }
+
+      .focus-panel {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto;
+        gap: 12px;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .focus-shot {
+        min-height: 0;
+        height: 420px;
+      }
+
+      .focus-shot img {
+        object-fit: contain;
+      }
+
+      .focus-caption {
+        display: grid;
+        gap: 6px;
+        border-radius: 20px;
+        background: var(--soft);
+        padding: 16px 18px;
+      }
+
+      .focus-caption strong,
+      .canvas-summary strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .focus-caption span,
+      .canvas-summary span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.32;
+      }
+
+      .canvas-summary {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        border-radius: 22px;
+        background: #fff0f3;
+        padding: 18px 22px;
+      }
+
+      .itinerary-detail,
+      .agent-points {
+        display: grid;
+        gap: 16px;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .itinerary-detail {
+        grid-template-rows: 380px auto;
+      }
+
+      .agent-points {
+        align-content: center;
+      }
+
+      .agent-layout-slide {
+        grid-template-rows: 1fr;
+      }
+
+      .agent-copy-stack {
+        display: grid;
+        gap: 18px;
+        align-content: center;
+        min-width: 0;
+      }
+
+      .agent-copy-stack h2 {
+        max-width: 680px;
+      }
+
+      .agent-copy-stack .agent-points {
+        align-content: start;
+      }
+
+      .agent-side-shot {
+        height: 704px;
+        align-self: center;
+      }
+
+      .agent-side-shot img {
+        object-fit: contain;
+        object-position: top center;
+      }
+
+      .agent-evidence-slide {
+        padding: 52px 64px 96px;
+        gap: 22px;
+      }
+
+      .agent-evidence-layout {
+        display: grid;
+        grid-template-columns: 760px minmax(0, 1fr);
+        gap: 34px;
+        align-items: center;
+        min-height: 0;
+      }
+
+      .evidence-frame {
+        display: grid;
+        gap: 12px;
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--paper);
+        padding: 14px;
+        box-shadow: 0 18px 48px rgba(30, 30, 20, 0.1);
+      }
+
+      .evidence-frame figcaption {
+        width: fit-content;
+        border-radius: 999px;
+        background: var(--soft);
+        color: var(--body);
+        padding: 10px 16px;
+        font-size: 26px;
+        font-weight: 850;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .evidence-frame img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border-radius: 18px;
+      }
+
+      .evidence-tools img {
+        height: 430px;
+        object-fit: contain;
+      }
+
+      .evidence-side {
+        display: grid;
+        gap: 18px;
+        align-content: center;
+        min-width: 0;
+      }
+
+      .agent-proof-points {
+        display: grid;
+        gap: 14px;
+      }
+
+      .agent-final-output {
+        display: grid;
+        gap: 8px;
+        border-radius: 22px;
+        background: var(--paper);
+        padding: 18px 20px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.07);
+      }
+
+      .agent-final-output strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .agent-final-output p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.26;
+      }
+
+      .proof-point {
+        display: grid;
+        gap: 7px;
+        border-radius: 22px;
+        background: var(--paper);
+        padding: 18px 20px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.07);
+      }
+
+      .proof-point strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .proof-point span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.28;
+      }
+
+      .canvas-full-shot,
+      .itinerary-detail-shot,
+      .agent-full-shot {
+        min-height: 0;
+      }
+
+      .canvas-full-shot {
+        height: 560px;
+      }
+
+      .itinerary-detail-shot {
+        height: 380px;
+      }
+
+      .agent-full-shot {
+        height: 575px;
+      }
+
+      .agent-full-shot.agent-side-shot {
+        height: 704px;
+      }
+
+      .canvas-full-shot img,
+      .itinerary-detail-shot img,
+      .agent-full-shot img {
+        object-fit: contain;
+      }
+
+      .feature-copy {
+        display: grid;
+        gap: 8px;
+        border-radius: 20px;
+        background: var(--soft);
+        padding: 18px 20px;
+      }
+
+      .feature-copy strong,
+      .overview-note strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .feature-copy p,
+      .overview-note span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.32;
+      }
+
+      .medium-shot {
+        height: 470px;
+      }
+
+      .small-shot {
+        height: 292px;
+      }
+
+      .cards-2x2 {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 20px;
+        align-content: center;
+      }
+
+      .card {
+        display: grid;
+        gap: 14px;
+        align-content: start;
+        min-height: 198px;
+        border-radius: 22px;
+        background: var(--paper);
+        padding: 25px 26px;
+        box-shadow: 0 12px 34px rgba(28, 28, 18, 0.08);
+      }
+
+      .soft .card {
+        background: var(--paper);
+      }
+
+      .card p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 620;
+        line-height: 1.34;
+      }
+
+      .card.compact {
+        min-height: 142px;
+      }
+
+      .background-layout {
+        display: grid;
+        grid-template-rows: 1fr;
+        gap: 0;
+        min-height: 0;
+        align-items: stretch;
+      }
+
+      .planning-thread,
+      .thesis-card {
+        border: 1px solid rgba(228, 226, 220, 0.9);
+        border-radius: 26px;
+        background: rgba(255, 255, 255, 0.8);
+        box-shadow: 0 14px 36px rgba(28, 28, 18, 0.08);
+      }
+
+      .planning-thread {
+        display: grid;
+        gap: 24px;
+        align-content: space-between;
+        padding: 32px 34px;
+      }
+
+      .thread-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 14px;
+      }
+
+      .thread-head strong {
+        font-size: 26px;
+        font-weight: 900;
+      }
+
+      .thread-head span {
+        border-radius: 999px;
+        background: var(--red);
+        color: var(--paper);
+        padding: 10px 16px;
+        font-size: 26px;
+        font-weight: 900;
+      }
+
+      .thread-flow {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 0;
+        align-items: start;
+        position: relative;
+      }
+
+      .thread-flow::before {
+        content: "";
+        position: absolute;
+        left: 9%;
+        right: 9%;
+        top: 39px;
+        height: 4px;
+        border-radius: 999px;
+        background: #e8e3dc;
+      }
+
+      .flow-node {
+        display: grid;
+        justify-items: center;
+        gap: 12px;
+        min-width: 0;
+        position: relative;
+        z-index: 1;
+        text-align: center;
+      }
+
+      .flow-node .dot {
+        display: grid;
+        width: 78px;
+        height: 78px;
+        place-items: center;
+        border: 5px solid var(--red);
+        border-radius: 50%;
+        background: var(--paper);
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+        box-shadow: 0 14px 28px rgba(230, 0, 35, 0.12);
+      }
+
+      .flow-node h3 {
+        font-size: 28px;
+        line-height: 1.35;
+      }
+
+      .flow-node p {
+        color: var(--ink);
+        font-size: 26px;
+        font-weight: 700;
+        line-height: 1.28;
+      }
+
+      .thread-insight {
+        display: grid;
+        gap: 7px;
+        border-radius: 20px;
+        background: #fff0f3;
+        color: var(--ink);
+        padding: 18px 20px;
+      }
+
+      .thread-insight strong {
+        color: var(--red);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .thread-insight p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 760;
+        line-height: 1.3;
+      }
+
+      .thread-outcomes {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+        gap: 14px;
+      }
+
+      .outcome-pill {
+        display: grid;
+        gap: 8px;
+        min-height: 116px;
+        border-radius: 20px;
+        background: var(--soft);
+        padding: 18px 19px;
+      }
+
+      .outcome-pill strong {
+        color: var(--ink);
+        font-size: 26px;
+        font-weight: 950;
+      }
+
+      .outcome-pill span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 720;
+        line-height: 1.28;
+      }
+
+      .outcome-pill.accent {
+        background: var(--red-bg);
+      }
+
+      .outcome-pill.accent strong {
+        color: var(--paper);
+      }
+
+      .outcome-pill.accent span {
+        color: rgba(255, 255, 255, 0.88);
+      }
+
+      .thesis-card {
+        display: grid;
+        align-content: center;
+        gap: 10px;
+        background: var(--red-bg);
+        color: var(--paper);
+        padding: 24px;
+        border: 0;
+      }
+
+      .thesis-card h3 {
+        font-size: 28px;
+      }
+
+      .thesis-card p {
+        color: rgba(255, 255, 255, 0.88);
+        font-size: 26px;
+        font-weight: 760;
+        line-height: 1.3;
+      }
+
+      .num {
+        display: inline-flex;
+        width: 52px;
+        height: 52px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        background: var(--red);
+        color: var(--paper);
+        font-size: 26px;
+        font-weight: 900;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .zone-grid {
+        display: grid;
+        grid-template-columns: 0.98fr 1.02fr;
+        gap: 28px;
+        align-items: center;
+      }
+
+      .zone-cards {
+        display: grid;
+        gap: 18px;
+      }
+
+      .zone-card {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        gap: 18px;
+        align-items: center;
+        border-radius: 22px;
+        background: var(--paper);
+        padding: 22px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.08);
+      }
+
+      .zone-mark {
+        display: grid;
+        width: 72px;
+        height: 72px;
+        place-items: center;
+        border-radius: 20px;
+        background: var(--red);
+        color: var(--paper);
+        font-size: 26px;
+        font-weight: 900;
+      }
+
+      .loop-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 34px;
+        align-items: center;
+      }
+
+      .flow-list {
+        display: grid;
+        gap: 14px;
+      }
+
+      .flow-item {
+        display: grid;
+        grid-template-columns: 116px minmax(0, 1fr);
+        gap: 20px;
+        align-items: center;
+        border-radius: 24px;
+        background: var(--soft);
+        padding: 20px 22px;
+      }
+
+      .flow-item strong {
+        color: var(--red);
+        font-size: 28px;
+        font-weight: 900;
+      }
+
+      .asset-stack {
+        display: grid;
+        gap: 16px;
+      }
+
+      .workflow-generated-body {
+        display: block;
+        width: 100%;
+        max-width: 1420px;
+        height: 520px;
+        object-fit: contain;
+        align-self: start;
+        justify-self: center;
+      }
+
+      .workflow-slide {
+        background: #f3f0e9;
+        padding-top: 112px;
+      }
+
+      .workflow-layout {
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        gap: 18px;
+        align-content: start;
+      }
+
+      .workflow-points {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 16px;
+        max-width: 1280px;
+        margin: 0 auto;
+      }
+
+      .workflow-point {
+        display: grid;
+        gap: 4px;
+        min-height: 76px;
+        border: 1px solid rgba(230, 0, 35, 0.08);
+        border-left: 5px solid rgba(230, 0, 35, 0.7);
+        border-radius: 18px;
+        background: rgba(255, 255, 255, 0.66);
+        padding: 14px 18px;
+        box-shadow: 0 18px 42px rgba(40, 37, 30, 0.06);
+      }
+
+      .workflow-point strong {
+        color: var(--red);
+        font-size: 24px;
+        font-weight: 900;
+      }
+
+      .workflow-point span {
+        color: var(--ink-soft);
+        font-size: 22px;
+        font-weight: 720;
+        line-height: 1.22;
+        text-wrap: balance;
+      }
+
+      .workflow-slide .workflow-generated-body {
+        width: min(100%, 1450px);
+        max-width: none;
+        height: auto;
+        margin: 0 auto;
+      }
+
+      .asset {
+        display: grid;
+        gap: 6px;
+        border-radius: 24px;
+        background: var(--red);
+        color: var(--paper);
+        padding: 28px;
+      }
+
+      .asset strong {
+        font-size: 34px;
+        font-weight: 900;
+      }
+
+      .asset span {
+        color: rgba(255, 255, 255, 0.86);
+        font-size: 26px;
+        font-weight: 700;
+      }
+
+      .agent-chain {
+        position: relative;
+        display: block;
+        min-height: 540px;
+      }
+
+      .execution-chain-slide {
+        display: block;
+      }
+
+      .execution-chain-slide .header {
+        position: absolute;
+        top: 56px;
+        left: 76px;
+        z-index: 3;
+        display: flex;
+        width: fit-content;
+        max-width: calc(100% - 152px);
+        align-items: center;
+        gap: 18px;
+      }
+
+      .execution-chain-slide .header .label {
+        flex: 0 0 auto;
+        padding: 9px 15px;
+        font-size: 24px;
+      }
+
+      .execution-chain-slide .header h2 {
+        max-width: none;
+        font-size: 38px;
+        line-height: 1.12;
+      }
+
+      .execution-chain-slide .agent-chain {
+        position: absolute;
+        inset: 166px 76px 96px;
+        min-height: 0;
+      }
+
+      .cycle-path {
+        position: absolute;
+        top: 214px;
+        left: 50%;
+        z-index: 0;
+        width: 280px;
+        height: 280px;
+        overflow: visible;
+        transform: translateX(-50%);
+      }
+
+      .cycle-path .cycle-disc {
+        fill: #fff7f8;
+        stroke: #f5cbd3;
+        stroke-width: 0.42;
+      }
+
+      .cycle-path .cycle-tick {
+        fill: #ef9dac;
+        opacity: 0.42;
+      }
+
+      .cycle-path .cycle-icon {
+        fill: none;
+        stroke: #e98496;
+        stroke-width: 1.35;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .chain-step {
+        position: absolute;
+        z-index: 1;
+        isolation: isolate;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 12px;
+        width: 410px;
+        min-height: 148px;
+        border-radius: 24px;
+        border: 1px solid rgba(228, 226, 220, 0.9);
+        background: var(--paper);
+        box-shadow: 0 14px 34px rgba(28, 28, 18, 0.06);
+        overflow: hidden;
+        padding: 22px 24px;
+        --accent: var(--red);
+        --accent-bg: var(--soft-strong);
+      }
+
+      .chain-step::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        z-index: 2;
+        width: 6px;
+        background: var(--accent);
+        opacity: 0.62;
+      }
+
+      .chain-ghost {
+        position: absolute;
+        right: -38px;
+        bottom: -48px;
+        z-index: 0;
+        width: 176px;
+        height: 176px;
+        color: var(--accent);
+        fill: currentColor;
+        stroke: none;
+        opacity: 0.075;
+        pointer-events: none;
+      }
+
+      .chain-context .chain-ghost {
+        right: -42px;
+        bottom: -50px;
+        width: 186px;
+        height: 186px;
+      }
+
+      .chain-tool .chain-ghost,
+      .chain-patch .chain-ghost {
+        right: -38px;
+      }
+
+      .chain-step strong,
+      .chain-step > span,
+      .chain-step .chip {
+        position: relative;
+        z-index: 3;
+      }
+
+      .chain-step strong {
+        grid-column: 1;
+        grid-row: 1;
+        align-self: center;
+        font-size: 27px;
+        font-weight: 900;
+      }
+
+      .chain-step > span:not(.chip),
+      .chain-step > span:not(.chip) .phrase {
+        grid-column: 1 / -1;
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 620;
+        line-height: 1.28;
+      }
+
+      .chain-step .chip {
+        grid-column: 2;
+        grid-row: 1;
+        width: fit-content;
+        justify-self: end;
+        align-self: start;
+        min-height: 50px;
+        border-radius: 999px;
+        padding: 10px 18px;
+        background: transparent;
+        color: var(--accent);
+        font-size: 26px;
+        font-weight: 850;
+        line-height: 1;
+      }
+
+      .chain-context {
+        --accent: #e60023;
+        --accent-bg: #fff0f3;
+        width: 431px;
+        top: -10px;
+        left: 50%;
+        transform: translateX(-50%);
+      }
+
+      .chain-tool {
+        --accent: #6e8d67;
+        --accent-bg: #eef5ea;
+        top: 128px;
+        right: 42px;
+        margin: 87px 19px 14px 4px;
+      }
+
+      .chain-patch {
+        --accent: #b87948;
+        --accent-bg: #f7efe8;
+        right: 96px;
+        bottom: 0;
+        margin-right: 65px;
+      }
+
+      .chain-trace {
+        --accent: #5e82a5;
+        --accent-bg: #edf3f8;
+        left: 96px;
+        bottom: 0;
+        margin-left: 47px;
+      }
+
+      .chain-diff {
+        --accent: #9a6d95;
+        --accent-bg: #f5eef4;
+        top: 128px;
+        left: 42px;
+        margin: 76px -24px 0 16px;
+      }
+
+      .context-map {
+        position: relative;
+        min-height: 596px;
+        overflow: hidden;
+        border-radius: 34px;
+        background:
+          radial-gradient(circle at 51% 48%, rgba(230, 0, 35, 0.08), transparent 28%),
+          linear-gradient(135deg, #fffdfa 0%, #f7f5ef 100%);
+        box-shadow: inset 0 0 0 1px rgba(228, 226, 220, 0.88);
+      }
+
+      .context-map-svg {
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+      }
+
+      .context-map .flow-in {
+        fill: none;
+        stroke: rgba(77, 77, 68, 0.38);
+        stroke-width: 3;
+      }
+
+      .context-map .flow-main {
+        fill: none;
+        stroke: var(--red);
+        stroke-width: 5;
+      }
+
+      .context-map .flow-soft {
+        fill: none;
+        stroke: rgba(21, 60, 41, 0.48);
+        stroke-width: 4;
+      }
+
+      .context-map .flow-muted {
+        fill: none;
+        stroke: rgba(77, 77, 68, 0.32);
+        stroke-dasharray: 10 12;
+        stroke-width: 4;
+      }
+
+      .map-node,
+      .map-core,
+      .agent-card,
+      .output-rail,
+      .noise-sink,
+      .flow-label {
+        position: absolute;
+        z-index: 2;
+      }
+
+      .map-node,
+      .agent-card,
+      .output-rail,
+      .noise-sink {
+        border: 1px solid rgba(228, 226, 220, 0.94);
+        background: rgba(255, 255, 255, 0.94);
+        box-shadow: 0 16px 38px rgba(28, 28, 18, 0.08);
+      }
+
+      .map-node {
+        display: grid;
+        width: 268px;
+        gap: 7px;
+        border-radius: 24px;
+        padding: 14px 18px;
+      }
+
+      .map-node::before {
+        content: attr(data-index);
+        position: absolute;
+        right: 18px;
+        top: 16px;
+        color: rgba(230, 0, 35, 0.34);
+        font-size: 32px;
+        font-weight: 950;
+        line-height: 1;
+      }
+
+      .map-node strong,
+      .agent-card strong,
+      .output-rail strong,
+      .noise-sink strong {
+        color: var(--ink);
+        font-size: 27px;
+        font-weight: 950;
+        line-height: 1.12;
+        white-space: normal;
+      }
+
+      .map-node span,
+      .agent-card span,
+      .output-rail span,
+      .noise-sink span {
+        color: var(--body);
+        font-size: 25px;
+        font-weight: 680;
+        line-height: 1.16;
+      }
+
+      .node-current {
+        left: 46px;
+        top: 44px;
+      }
+
+      .node-recent {
+        left: 112px;
+        top: 168px;
+      }
+
+      .node-history {
+        left: 46px;
+        top: 292px;
+      }
+
+      .node-assets {
+        left: 112px;
+        top: 416px;
+      }
+
+      .map-core {
+        left: 493px;
+        top: 92px;
+        width: 408px;
+        min-height: 286px;
+        border-radius: 34px;
+        background: var(--red-bg);
+        color: var(--paper);
+        padding: 22px 24px;
+        box-shadow:
+          0 26px 62px rgba(204, 52, 76, 0.22),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+      }
+
+      .core-kicker {
+        display: block;
+        color: rgba(255, 255, 255, 0.82);
+        font-size: 25px;
+        font-weight: 820;
+        line-height: 1;
+      }
+
+      .map-core strong {
+        display: block;
+        margin-top: 7px;
+        color: var(--paper);
+        font-size: 32px;
+        font-weight: 950;
+        line-height: 1.14;
+        white-space: normal;
+      }
+
+      .core-stack {
+        display: grid;
+        gap: 9px;
+        margin-top: 15px;
+      }
+
+      .core-step {
+        display: grid;
+        grid-template-columns: 102px minmax(0, 1fr);
+        align-items: center;
+        gap: 12px;
+        border-radius: 19px;
+        background: rgba(255, 255, 255, 0.16);
+        padding: 10px 13px;
+      }
+
+      .core-step b {
+        color: var(--paper);
+        font-size: 26px;
+        font-weight: 950;
+        line-height: 1;
+      }
+
+      .core-step span {
+        color: rgba(255, 255, 255, 0.88);
+        font-size: 25px;
+        font-weight: 720;
+        line-height: 1.12;
+      }
+
+      .agent-card {
+        display: grid;
+        width: 254px;
+        gap: 8px;
+        border-radius: 999px;
+        padding: 16px 26px;
+      }
+
+      .agent-card::before {
+        content: "";
+        position: absolute;
+        left: -10px;
+        top: 50%;
+        width: 20px;
+        height: 20px;
+        border-radius: 999px;
+        background: var(--red);
+        transform: translateY(-50%);
+      }
+
+      .agent-context {
+        left: 1034px;
+        top: 48px;
+        background: var(--green-soft);
+      }
+
+      .agent-planner {
+        left: 1162px;
+        top: 172px;
+      }
+
+      .agent-transport {
+        left: 1034px;
+        top: 296px;
+      }
+
+      .agent-style {
+        left: 1162px;
+        top: 420px;
+      }
+
+      .output-rail {
+        left: 520px;
+        top: 424px;
+        display: grid;
+        width: 436px;
+        gap: 9px;
+        border-radius: 28px;
+        background: var(--ink);
+        color: var(--paper);
+        padding: 17px 22px;
+      }
+
+      .output-rail strong,
+      .output-rail span {
+        color: var(--paper);
+      }
+
+      .output-tags {
+        display: flex;
+        gap: 10px;
+      }
+
+      .output-tags em {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.15);
+        color: var(--paper);
+        padding: 7px 13px;
+        font-size: 25px;
+        font-style: normal;
+        font-weight: 850;
+        line-height: 1;
+      }
+
+      .noise-sink {
+        left: 378px;
+        top: 422px;
+        width: 152px;
+        border-style: dashed;
+        border-radius: 24px;
+        background: rgba(246, 245, 241, 0.8);
+        padding: 14px 16px;
+        opacity: 0.78;
+      }
+
+      .noise-sink strong {
+        font-size: 27px;
+      }
+
+      .noise-sink span {
+        display: block;
+        margin-top: 6px;
+        font-size: 25px;
+      }
+
+      .flow-label {
+        display: inline-flex;
+        align-items: center;
+        min-height: 42px;
+        border-radius: 999px;
+        background: var(--paper);
+        color: var(--red);
+        padding: 8px 15px;
+        font-size: 26px;
+        font-weight: 900;
+        line-height: 1;
+        z-index: 4;
+        box-shadow: 0 10px 24px rgba(28, 28, 18, 0.08);
+      }
+
+      .label-ingest {
+        left: 374px;
+        top: 78px;
+      }
+
+      .label-route {
+        left: 890px;
+        top: 116px;
+      }
+
+      .label-filter {
+        left: 322px;
+        top: 386px;
+        color: var(--muted);
+      }
+
+      .context-generated-slide {
+        gap: 12px;
+        padding: 38px 64px 84px;
+        background: #fdfaf7;
+      }
+
+      .context-generated-slide .header {
+        position: relative;
+        z-index: 2;
+      }
+
+      .context-native-image {
+        position: relative;
+        z-index: 1;
+        display: block;
+        align-self: center;
+        justify-self: center;
+        width: auto;
+        height: 710px;
+        margin-top: -33px;
+        max-width: 100%;
+        object-fit: contain;
+        object-position: center center;
+      }
+
+      .context-overlay {
+        position: absolute;
+        z-index: 3;
+        display: grid;
+        gap: 4px;
+        color: var(--ink);
+      }
+
+      .context-overlay strong {
+        color: var(--ink);
+        font-size: 26px;
+        font-weight: 950;
+        line-height: 1.08;
+        white-space: normal;
+      }
+
+      .context-overlay span {
+        color: var(--body);
+        font-size: 23px;
+        font-weight: 720;
+        line-height: 1.12;
+      }
+
+      .context-overlay.core-label strong,
+      .context-overlay.core-label span,
+      .context-overlay.output-label strong,
+      .context-overlay.output-label span {
+        color: var(--paper);
+      }
+
+      .context-overlay.core-label strong {
+        font-size: 28px;
+        line-height: 1.08;
+      }
+
+      .context-overlay.core-label span {
+        font-size: 23px;
+        color: rgba(255, 255, 255, 0.88);
+      }
+
+      .context-overlay.output-label strong {
+        font-size: 26px;
+      }
+
+      .context-overlay.output-label span {
+        font-size: 23px;
+        color: rgba(255, 255, 255, 0.84);
+      }
+
+      .context-overlay.process-label {
+        grid-template-columns: 70px minmax(0, 1fr);
+        align-items: center;
+      }
+
+      .context-overlay.process-label strong {
+        color: var(--paper);
+        font-size: 24px;
+      }
+
+      .context-overlay.process-label span {
+        color: rgba(255, 255, 255, 0.88);
+        font-size: 22px;
+      }
+
+      .overlay-current {
+        left: 252px;
+        top: 76px;
+        width: 285px;
+      }
+
+      .overlay-recent {
+        left: 252px;
+        top: 188px;
+        width: 285px;
+      }
+
+      .overlay-history {
+        left: 252px;
+        top: 300px;
+        width: 285px;
+      }
+
+      .overlay-assets {
+        left: 252px;
+        top: 412px;
+        width: 285px;
+      }
+
+      .overlay-core {
+        left: 613px;
+        top: 155px;
+        width: 330px;
+        text-align: center;
+      }
+
+      .overlay-keep {
+        left: 604px;
+        top: 273px;
+        width: 315px;
+      }
+
+      .overlay-compact {
+        left: 604px;
+        top: 345px;
+        width: 315px;
+      }
+
+      .overlay-filter {
+        left: 604px;
+        top: 418px;
+        width: 315px;
+      }
+
+      .overlay-context-agent {
+        left: 1038px;
+        top: 82px;
+        width: 270px;
+      }
+
+      .overlay-planner-agent {
+        left: 1038px;
+        top: 195px;
+        width: 270px;
+      }
+
+      .overlay-transport-agent {
+        left: 1038px;
+        top: 307px;
+        width: 270px;
+      }
+
+      .overlay-style-agent {
+        left: 1038px;
+        top: 419px;
+        width: 270px;
+      }
+
+      .overlay-noise {
+        left: 330px;
+        top: 528px;
+        width: 250px;
+      }
+
+      .overlay-output {
+        left: 616px;
+        top: 526px;
+        width: 430px;
+      }
+
+      .context-step > div,
+      .step-row > div {
+        display: grid;
+        gap: 8px;
+      }
+
+      .memory-note,
+      .memory-contrast {
+        display: grid;
+        gap: 14px;
+        border-radius: 24px;
+        background: var(--paper);
+        padding: 28px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.08);
+      }
+
+      .memory-contrast {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .memory-note p,
+      .memory-contrast p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 630;
+        line-height: 1.32;
+      }
+
+      .memory-contrast p {
+        color: rgba(21, 60, 41, 0.78);
+      }
+
+      .memory-continuity-slide {
+        gap: 22px;
+      }
+
+      .memory-continuity-layout {
+        display: grid;
+        grid-template-columns: 420px minmax(0, 1fr);
+        gap: 30px;
+        align-items: stretch;
+        min-height: 0;
+      }
+
+      .memory-text-stack {
+        display: grid;
+        gap: 12px;
+        align-content: stretch;
+        min-width: 0;
+        min-height: 0;
+      }
+
+      .memory-panel {
+        display: grid;
+        gap: 12px;
+        align-content: start;
+        min-height: 0;
+        border-radius: 24px;
+        background: var(--paper);
+        padding: 22px 22px 20px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.08);
+      }
+
+      .memory-panel.memory-green {
+        background: var(--green-soft);
+        color: var(--green);
+      }
+
+      .memory-index {
+        display: inline-flex;
+        width: fit-content;
+        min-height: 36px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 999px;
+        background: #fff0f3;
+        color: var(--red);
+        padding: 7px 12px;
+        font-size: 18px;
+        font-weight: 950;
+        line-height: 1;
+      }
+
+      .memory-green .memory-index {
+        background: rgba(255, 255, 255, 0.7);
+        color: var(--green);
+      }
+
+      .memory-panel strong {
+        color: var(--red);
+        font-size: 28px;
+        font-weight: 950;
+      }
+
+      .memory-panel p {
+        margin: 0;
+        color: var(--body);
+        font-size: 23px;
+        font-weight: 650;
+        line-height: 1.34;
+        text-wrap: pretty;
+      }
+
+      .memory-panel.memory-green strong {
+        color: var(--green);
+      }
+
+      .memory-panel.memory-green p {
+        color: rgba(21, 60, 41, 0.78);
+      }
+
+      .lane-chips,
+      .memory-panel .chip-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .memory-panel .chip {
+        min-height: 36px;
+        padding: 7px 12px;
+        font-size: 18px;
+      }
+
+      .memory-panel.memory-green .chip {
+        background: rgba(21, 60, 41, 0.1);
+        color: var(--green);
+      }
+
+      .memory-preference-shot {
+        height: 586px;
+      }
+
+      .memory-preference-shot img {
+        object-fit: cover;
+        object-position: top left;
+      }
+
+      .skill-intro-slide {
+        position: relative;
+        gap: 26px;
+      }
+
+      .skill-intro-slide::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 78% 26%, rgba(255, 255, 255, 0.16) 0 2px, transparent 3px 100%),
+          radial-gradient(circle at 86% 72%, rgba(255, 255, 255, 0.12) 0 2px, transparent 3px 100%);
+        background-size: 54px 54px, 72px 72px;
+        opacity: 0.65;
+        pointer-events: none;
+      }
+
+      .skill-intro-slide > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .skill-intro-slide .header {
+        gap: 16px;
+      }
+
+      .skill-intro-slide h2 {
+        max-width: 1040px;
+        padding-bottom: 4px;
+      }
+
+      .skill-intro-slide .lead {
+        max-width: 900px;
+        color: rgba(255, 255, 255, 0.86);
+      }
+
+      .skill-intro-layout {
+        display: grid;
+        grid-template-columns: 1.04fr 0.96fr;
+        gap: 42px;
+        align-items: center;
+        min-height: 0;
+      }
+
+      .skill-generated-body {
+        display: block;
+        width: 100%;
+        max-width: 1420px;
+        height: 520px;
+        object-fit: contain;
+        align-self: start;
+        justify-self: center;
+      }
+
+      .skill-hero-card,
+      .skill-route-card {
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 28px;
+        box-shadow: 0 18px 46px rgba(90, 0, 18, 0.18);
+      }
+
+      .skill-hero-card {
+        position: relative;
+        display: grid;
+        align-content: space-between;
+        gap: 34px;
+        min-height: 454px;
+        overflow: hidden;
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.08));
+        padding: 42px;
+      }
+
+      .skill-hero-card::before {
+        content: "";
+        position: absolute;
+        right: 38px;
+        bottom: 32px;
+        width: 250px;
+        height: 250px;
+        border: 32px solid rgba(255, 255, 255, 0.16);
+        border-radius: 50%;
+      }
+
+      .skill-hero-card::after {
+        content: "";
+        position: absolute;
+        right: 102px;
+        bottom: 88px;
+        width: 164px;
+        height: 164px;
+        border-radius: 40px;
+        background:
+          linear-gradient(90deg, transparent 45%, rgba(255, 255, 255, 0.24) 45% 55%, transparent 55%),
+          linear-gradient(0deg, transparent 45%, rgba(255, 255, 255, 0.24) 45% 55%, transparent 55%);
+        transform: rotate(12deg);
+      }
+
+      .skill-hero-card > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .skill-hero-card strong {
+        display: block;
+        color: var(--paper);
+        font-size: 56px;
+        font-weight: 950;
+        line-height: 1.12;
+        white-space: normal;
+      }
+
+      .skill-hero-card p {
+        max-width: 510px;
+        margin-top: 22px;
+        color: rgba(255, 255, 255, 0.86);
+        font-size: 27px;
+        font-weight: 760;
+        line-height: 1.34;
+      }
+
+      .skill-path {
+        display: grid;
+        grid-template-columns: minmax(0, 210px) 64px minmax(0, 210px);
+        gap: 14px;
+        align-items: center;
+      }
+
+      .skill-path span {
+        display: grid;
+        min-height: 56px;
+        place-items: center;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.18);
+        color: var(--paper);
+        font-size: 23px;
+        font-weight: 900;
+        line-height: 1;
+      }
+
+      .skill-path b {
+        color: rgba(255, 255, 255, 0.74);
+        font-size: 30px;
+        line-height: 1;
+      }
+
+      .skill-route-stack {
+        display: grid;
+        gap: 18px;
+        min-height: 0;
+      }
+
+      .skill-route-card {
+        position: relative;
+        display: grid;
+        grid-template-columns: 70px minmax(0, 1fr);
+        gap: 20px;
+        align-items: center;
+        min-height: 118px;
+        overflow: hidden;
+        background: rgba(255, 255, 255, 0.92);
+        color: var(--ink);
+        padding: 24px 30px;
+      }
+
+      .skill-route-card::after {
+        content: "";
+        position: absolute;
+        right: 28px;
+        top: 50%;
+        width: 92px;
+        height: 92px;
+        border-radius: 50%;
+        background: #fff0f3;
+        transform: translateY(-50%);
+      }
+
+      .skill-route-card > * {
+        position: relative;
+        z-index: 1;
+      }
+
+      .skill-route-card .num {
+        width: 64px;
+        height: 64px;
+        background: rgba(230, 0, 35, 0.09);
+        color: var(--red);
+        font-size: 22px;
+      }
+
+      .skill-route-card strong {
+        color: var(--ink);
+        font-size: 31px;
+        font-weight: 950;
+      }
+
+      .skill-route-card p {
+        margin-top: 8px;
+        color: var(--body);
+        font-size: 24px;
+        font-weight: 680;
+        line-height: 1.3;
+      }
+
+      .skill-flow {
+        display: grid;
+        grid-template-columns: 1.06fr 0.94fr;
+        gap: 30px;
+        align-items: center;
+      }
+
+      .skill-product-slide .split.reverse {
+        grid-template-columns: minmax(0, 1.45fr) minmax(380px, 0.72fr);
+        gap: 44px;
+      }
+
+      .skill-product-slide .skill-flow {
+        grid-template-columns: minmax(0, 1.45fr) minmax(390px, 0.72fr);
+        gap: 36px;
+      }
+
+      .skill-product-shot {
+        grid-template-rows: minmax(0, 1fr);
+        height: 590px;
+        padding: 12px;
+      }
+
+      .skill-product-shot .shot-label {
+        display: none;
+      }
+
+      .skill-product-shot img {
+        object-fit: cover;
+        object-position: top center;
+      }
+
+      .skill-product-slide .steps {
+        gap: 14px;
+      }
+
+      .skill-product-slide .step-row {
+        padding: 18px 20px;
+      }
+
+      .skill-product-slide .step-row p {
+        font-size: 24px;
+      }
+
+      .steps {
+        display: grid;
+        gap: 15px;
+      }
+
+      .step-row {
+        display: grid;
+        grid-template-columns: 58px minmax(0, 1fr);
+        gap: 16px;
+        align-items: center;
+        border-radius: 22px;
+        background: var(--paper);
+        padding: 20px 22px;
+        box-shadow: 0 12px 32px rgba(28, 28, 18, 0.08);
+      }
+
+      .step-row p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 630;
+        line-height: 1.3;
+      }
+
+      .badcase-list {
+        display: grid;
+        gap: 15px;
+        align-content: center;
+      }
+
+      .badcase {
+        display: grid;
+        grid-template-columns: 190px minmax(0, 1fr) 390px;
+        gap: 22px;
+        align-items: center;
+        border-radius: 24px;
+        background: var(--soft);
+        padding: 20px 22px;
+      }
+
+      .badcase .case-label {
+        display: inline-flex;
+        width: fit-content;
+        border-radius: 999px;
+        background: var(--paper);
+        color: var(--red);
+        padding: 10px 16px;
+        font-size: 26px;
+        font-weight: 900;
+      }
+
+      .badcase p {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 630;
+        line-height: 1.3;
+      }
+
+      .value-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        width: 100%;
+        max-width: 1120px;
+      }
+
+      .value-card {
+        display: grid;
+        gap: 8px;
+        min-height: 150px;
+        align-content: center;
+        border-radius: 24px;
+        background: var(--paper);
+        color: var(--red);
+        padding: 24px;
+        text-align: center;
+      }
+
+      .value-card strong {
+        font-size: 35px;
+        font-weight: 900;
+      }
+
+      .value-card span {
+        color: var(--body);
+        font-size: 26px;
+        font-weight: 730;
+        line-height: 1.28;
+      }
+
+      .red .value-card span {
+        color: var(--body);
+      }
+
+      .center {
+        display: grid;
+        place-items: center;
+        gap: 24px;
+        text-align: center;
+      }
+
+      .center h2 {
+        max-width: 1080px;
+        font-size: 46px;
+        line-height: 1.24;
+      }
+
+      .thanks-slide {
+        grid-template-rows: 1fr;
+        isolation: isolate;
+      }
+
+      .thanks-slide::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        opacity: 0.58;
+        background: url("journey-thanks-background.png") center / cover no-repeat;
+        mix-blend-mode: screen;
+        pointer-events: none;
+      }
+
+      .thanks-slide .center {
+        position: relative;
+        z-index: 1;
+      }
+
+      .thanks-title {
+        max-width: none;
+        font-size: 108px;
+        line-height: 1.04;
+        letter-spacing: 0;
+      }
+
+      .thanks-tags {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 14px;
+        margin-top: 10px;
+      }
+
+      .thanks-tags .chip {
+        background: rgba(255, 255, 255, 0.18);
+        color: var(--paper);
+        font-size: 24px;
+      }
+
+      .notes {
+        display: none;
+      }
+
+      .nav {
+        position: fixed;
+        left: 50%;
+        bottom: 8px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 5px;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.13);
+        transform: translateX(-50%) scale(0.92);
+        transform-origin: bottom center;
+        backdrop-filter: blur(18px);
+      }
+
+      .nav button {
+        display: grid;
+        width: 44px;
+        height: 44px;
+        place-items: center;
+        border: 0;
+        border-radius: 999px;
+        background: var(--soft);
+        color: var(--ink);
+        cursor: pointer;
+        font-size: 26px;
+        font-weight: 900;
+        transition:
+          background-color 160ms ease,
+          color 160ms ease,
+          opacity 160ms ease;
+      }
+
+      .nav button:hover:not(:disabled) {
+        background: #e7e5dd;
+      }
+
+      .nav button.primary-nav {
+        width: auto;
+        min-width: 92px;
+        background: var(--red);
+        color: var(--paper);
+        padding: 0 18px;
+        font-size: 26px;
+      }
+
+      .nav button.primary-nav:hover {
+        background: var(--red-dark);
+      }
+
+      .nav button:disabled {
+        color: #a5a49b;
+        cursor: not-allowed;
+      }
+
+      .button:focus-visible,
+      .nav button:focus-visible {
+        outline: 4px solid var(--blue);
+        outline-offset: 3px;
+      }
+
+      .slide-count {
+        min-width: 92px;
+        color: var(--muted);
+        text-align: center;
+        font-size: 26px;
+        font-weight: 850;
+        font-variant-numeric: tabular-nums;
+      }
+
+      .progress {
+        position: fixed;
+        left: 0;
+        top: 0;
+        z-index: 30;
+        height: 5px;
+        width: 100%;
+        background: #e5e3dc;
+      }
+
+      .progress span {
+        display: block;
+        height: 100%;
+        width: calc(var(--progress, 0) * 1%);
+        background: var(--red);
+        transition: width 180ms ease;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .slide,
+        .progress span {
+          transition: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#deck">跳到幻灯片</a>
+    <div class="progress" aria-hidden="true"><span></span></div>
+    <main id="deck" class="viewport" aria-label="Journey Agent 答辩幻灯片">
+      <div class="stage">
+        <section class="slide red cover-slide" data-section="01 / 13">
+          <div class="body split hero">
+            <div class="stack">
+              <span class="label">Journey Agent</span>
+              <h1><span class="phrase">把旅行对话</span><wbr><span class="phrase">落到可改的</span><wbr><span class="phrase">行程里</span></h1>
+              <p class="lead"><span class="phrase">给自由行规划用的</span><wbr><span class="phrase"> Agent 工作台</span>：<wbr><span class="phrase">听懂偏好</span>、<wbr><span class="phrase">查询地点和路线</span>、<wbr><span class="phrase">把改动写进画布</span></p>
+              <div class="button-row">
+                <span class="chip">画布可编辑</span>
+                <span class="chip">执行可追溯</span>
+                <span class="chip">经验可复用</span>
+              </div>
+            </div>
+            <figure class="shot hero-shot">
+              <span class="shot-label">真实前端完成态</span>
+              <img src="agent-completed-workbench-map-cover-real-dom.png" width="1600" height="1080" fetchpriority="high" alt="真实前端中地图、路线卡和 Agent 完成态同时可见的工作台" />
+            </figure>
+          </div>
+          <aside class="notes">开场只讲产品定位，不展开任务清单</aside>
+        </section>
+
+        <section class="slide soft" data-section="02 / 13">
+          <header class="header">
+            <span class="label">产品背景</span>
+            <h2><span class="phrase">旅行规划的复杂性</span><wbr><span class="phrase">来自持续变化的现实约束</span></h2>
+          </header>
+          <div class="body background-layout">
+            <section class="planning-thread" aria-label="真实旅行规划过程">
+              <div class="thread-head">
+                <strong>真实旅行规划过程</strong>
+                <span>反复校准</span>
+              </div>
+              <div class="thread-flow">
+                <article class="flow-node">
+                  <span class="dot">01</span>
+                  <h3>出行框架</h3>
+                </article>
+                <article class="flow-node">
+                  <span class="dot">02</span>
+                  <h3>个人约束</h3>
+                </article>
+                <article class="flow-node">
+                  <span class="dot">03</span>
+                  <h3>候选取舍</h3>
+                </article>
+                <article class="flow-node">
+                  <span class="dot">04</span>
+                  <h3>现实校准</h3>
+                </article>
+                <article class="flow-node">
+                  <span class="dot">05</span>
+                  <h3>旅行复盘</h3>
+                </article>
+              </div>
+              <div class="thread-outcomes" aria-label="产品背景判断">
+                <article class="outcome-pill">
+                  <strong>信息分散</strong>
+                  <span><span class="phrase">偏好、地点与限制</span><wbr><span class="phrase">来自不同来源</span></span>
+                </article>
+                <article class="outcome-pill">
+                  <strong>约束会变化</strong>
+                  <span><span class="phrase">天气、体力和同行人意见</span><wbr><span class="phrase">会影响安排</span></span>
+                </article>
+                <article class="outcome-pill">
+                  <strong>决策要留痕</strong>
+                  <span><span class="phrase">取舍理由</span><wbr><span class="phrase">会影响后续调整</span></span>
+                </article>
+                <article class="outcome-pill accent">
+                  <strong>产品机会</strong>
+                  <span><span class="phrase">把规划与复盘过程</span><wbr><span class="phrase">沉淀为可维护的行程资产</span></span>
+                </article>
+              </div>
+            </section>
+          </div>
+          <aside class="notes">用生命周期和产品化判断说明背景，不展开基础功能清单</aside>
+        </section>
+
+        <section class="slide spotlight-slide" data-section="03 / 13">
+          <div class="body spotlight-layout">
+            <figure class="shot spotlight-shot">
+              <span class="shot-label">地图画布</span>
+              <img src="agent-completed-map-feature-real-dom.png" width="1504" height="800" alt="地图画布特写" />
+            </figure>
+            <div class="spotlight-copy">
+              <span class="label">产品总览</span>
+              <h2><span class="phrase">先把行程</span><wbr><span class="phrase">放进地图画布</span></h2>
+              <article class="spotlight-card">
+                <strong>空间关系</strong>
+                <span><span class="phrase">地点分布</span>、<wbr><span class="phrase">路线距离</span><wbr><span class="phrase">直接可见</span></span>
+              </article>
+              <article class="spotlight-card">
+                <strong>画布资产</strong>
+                <span><span class="phrase">行程进入画布</span>，<wbr><span class="phrase">后续继续维护</span></span>
+              </article>
+            </div>
+          </div>
+          <aside class="notes">产品总览第一部分，单独展示地图画布，保证截图足够大</aside>
+        </section>
+
+        <section class="slide spotlight-slide" data-section="04 / 13">
+          <div class="body spotlight-layout itinerary-spotlight-layout">
+            <figure class="shot spotlight-shot">
+              <span class="shot-label">具体行程编排</span>
+              <img src="agent-completed-itinerary-feature-real-dom.png" width="1504" height="1520" alt="具体行程编排特写" />
+            </figure>
+            <div class="spotlight-copy">
+              <span class="label">产品总览</span>
+              <h2><span class="phrase">具体安排</span><wbr><span class="phrase">继续可调</span></h2>
+              <article class="spotlight-card">
+                <strong>执行顺序</strong>
+                <span><span class="phrase">日期、活动</span>、<wbr><span class="phrase">时间段</span><wbr><span class="phrase">集中维护</span></span>
+              </article>
+              <article class="spotlight-card">
+                <strong>持续编辑</strong>
+                <span><span class="phrase">地点替换</span>、<wbr><span class="phrase">顺序调整</span><wbr><span class="phrase">都留在画布</span></span>
+              </article>
+            </div>
+          </div>
+          <aside class="notes">产品总览第二部分，单独展示具体行程编排</aside>
+        </section>
+
+        <section class="slide soft agent-evidence-slide" data-section="05 / 13">
+          <header class="header">
+            <span class="label">界面组织</span>
+            <h2><span class="phrase">Agent 协作在右侧展开</span>，<wbr><span class="phrase">执行记录和画布改动</span><wbr><span class="phrase">一起可见</span></h2>
+          </header>
+          <div class="body agent-evidence-layout">
+            <figure class="evidence-frame evidence-tools">
+              <figcaption>工具调用记录</figcaption>
+              <img src="agent-completed-tools-hidpi.png" width="906" height="684" alt="Agent 工具调用记录，展示搜索地点、查询天气和规划交通路线三步" />
+            </figure>
+            <div class="evidence-side">
+              <figure class="evidence-frame">
+                <figcaption>最终输出 + diff</figcaption>
+                <img src="agent-completed-agent-combo-hidpi.png" width="906" height="620" alt="Agent 最终输出与本轮改动 diff 的同一张截图" />
+              </figure>
+            </div>
+          </div>
+          <aside class="notes">产品总览第三部分，用高清截图说明工具调用记录和本轮改动 diff</aside>
+        </section>
+
+        <section class="slide workflow-slide" data-section="06 / 13">
+          <header class="header">
+            <span class="label">工作流程</span>
+            <h2><span class="phrase">从一句需求</span>，<wbr><span class="phrase">到行程改动</span>，<wbr><span class="phrase">再到下次还能用的经验</span></h2>
+          </header>
+          <div class="body workflow-layout">
+            <div class="workflow-points" aria-label="工作流程说明">
+              <div class="workflow-point">
+                <strong>意图进入执行链</strong>
+                <span>需求先拆成可调用工具与可验证结果</span>
+              </div>
+              <div class="workflow-point">
+                <strong>结果回写画布</strong>
+                <span>路线、地点和顺序形成结构化行程改动</span>
+              </div>
+              <div class="workflow-point">
+                <strong>经验持续复用</strong>
+                <span>取舍原则与偏好沉淀为后续规划资产</span>
+              </div>
+            </div>
+            <img class="workflow-generated-body" src="workflow-body-transparent.png" width="2068" height="468" alt="Journey Agent 工作流程主体图：输入需求、工具执行、画布确认、经验留存" />
+          </div>
+          <aside class="notes">取消空卡片，用流程和落点解释这套工作方式</aside>
+        </section>
+
+        <section class="slide soft execution-chain-slide" data-section="07 / 13">
+          <header class="header">
+            <span class="label">执行链</span>
+            <h2><span class="phrase">执行上下文与改动全链路可追溯</span></h2>
+          </header>
+          <div class="body agent-chain">
+            <svg class="cycle-path" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle class="cycle-disc" cx="12" cy="12" r="10.4"></circle>
+              <circle class="cycle-tick" cx="12" cy="2.85" r="0.42"></circle>
+              <circle class="cycle-tick" cx="21.15" cy="12" r="0.42"></circle>
+              <circle class="cycle-tick" cx="12" cy="21.15" r="0.42"></circle>
+              <circle class="cycle-tick" cx="2.85" cy="12" r="0.42"></circle>
+              <path class="cycle-icon" d="M3 12a9 9 0 0 1 15.74-5.96L21 8"></path>
+              <path class="cycle-icon" d="M21 3v5h-5"></path>
+              <path class="cycle-icon" d="M21 12a9 9 0 0 1-15.74 5.96L3 16"></path>
+              <path class="cycle-icon" d="M3 21v-5h5"></path>
+            </svg>
+            <article class="chain-step chain-context">
+              <svg class="chain-ghost" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M12 2 2 7l10 5 10-5-10-5Zm0 12.2L4.2 10.3 2 11.4l10 5 10-5-2.2-1.1-7.8 3.9Zm0 4L4.2 14.3 2 15.4l10 5 10-5-2.2-1.1-7.8 3.9Z"></path>
+              </svg>
+              <span class="chip">Context</span>
+              <strong>读取上下文</strong>
+              <span><span class="phrase">当前行程</span>、<wbr><span class="phrase">已导入 Skill</span>、<wbr><span class="phrase">saved memories</span> <wbr><span class="phrase">进入本轮输入</span></span>
+            </article>
+            <article class="chain-step chain-tool">
+              <svg class="chain-ghost" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M22 19.6 13.35 11a6.8 6.8 0 0 0-1.55-7.2A6.3 6.3 0 0 0 5 2.45l4.35 4.35-2.8 2.8L2.1 5.25A6.35 6.35 0 0 0 3.8 12a6.8 6.8 0 0 0 7.05 1.4L19.4 22a1.15 1.15 0 0 0 1.62 0L22 21a1 1 0 0 0 0-1.4Z"></path>
+              </svg>
+              <span class="chip">Tool Call</span>
+              <strong>调用规划工具</strong>
+              <span><span class="phrase">新增</span>、<wbr><span class="phrase">替换</span>、<wbr><span class="phrase">调整</span><wbr><span class="phrase">或只读查询</span><wbr><span class="phrase">都用参数表达</span></span>
+            </article>
+            <article class="chain-step chain-patch">
+              <svg class="chain-ghost" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M3 17.25V21h3.75L18.06 9.69l-3.75-3.75L3 17.25Zm18.37-11.3a1 1 0 0 0 0-1.42l-1.9-1.9a1 1 0 0 0-1.42 0l-1.48 1.48 3.75 3.75 1.05-1.91Z"></path>
+              </svg>
+              <span class="chip">Patch</span>
+              <strong>写入行程对象</strong>
+              <span><span class="phrase">工具结果</span><wbr><span class="phrase">先进入行程状态</span>，<wbr><span class="phrase">不直接散落在</span><wbr><span class="phrase">聊天文本里</span></span>
+            </article>
+            <article class="chain-step chain-trace">
+              <svg class="chain-ghost" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M21 11h-3.4l-2.15 6.45a1.2 1.2 0 0 1-2.28-.02L9.8 7.3 7.65 13H3a1 1 0 0 1 0-2h3.28l2.5-6.65a1.2 1.2 0 0 1 2.27.03l3.28 9.84 1.35-4.05A1.2 1.2 0 0 1 16.82 9H21a1 1 0 1 1 0 2Z"></path>
+              </svg>
+              <span class="chip">Trace</span>
+              <strong>记录运行轨迹</strong>
+              <span><span class="phrase">工具调用</span>、<wbr><span class="phrase">上下文处理</span><wbr><span class="phrase">和异常状态</span><wbr><span class="phrase">形成可查记录</span></span>
+            </article>
+            <article class="chain-step chain-diff">
+              <svg class="chain-ghost" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                <path d="M7 3a4 4 0 0 0-1 7.87V13a5 5 0 0 0 5 5h4.13A4 4 0 1 0 15 16h-4a3 3 0 0 1-3-3v-2.13A4 4 0 0 0 7 3Zm0 12a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"></path>
+              </svg>
+              <span class="chip">Diff</span>
+              <strong>形成本轮改动</strong>
+              <span><span class="phrase">用户能看到</span><wbr><span class="phrase">Agent 本轮</span><wbr><span class="phrase">改了哪些</span><wbr><span class="phrase">画布内容</span></span>
+            </article>
+          </div>
+          <aside class="notes">用设计化执行链表达工具调用记录，不依赖小截图</aside>
+        </section>
+
+        <section class="slide context-generated-slide" data-section="08 / 13">
+          <header class="header">
+            <span class="label">上下文</span>
+            <h2><span class="phrase">上下文先治理</span>，<wbr><span class="phrase">再按职责分发给 Agent</span></h2>
+          </header>
+          <img class="body context-native-image" src="context-governance-generated.png" width="1672" height="941" alt="生图模型生成的上下文治理与职责分发结构图" />
+          <aside class="notes">多 Agent 不作为独立噱头，而是放进上下文治理：先过滤无关历史，再把最小必要信息交给对应职责</aside>
+        </section>
+
+        <section class="slide soft memory-continuity-slide" data-section="09 / 13">
+          <header class="header">
+            <span class="label">记忆体系</span>
+            <h2><span class="phrase">会话连续性</span><wbr><span class="phrase">与长期偏好复用</span></h2>
+          </header>
+          <div class="body memory-continuity-layout">
+            <div class="memory-text-stack">
+              <article class="memory-panel">
+                <span class="memory-index">01</span>
+                <strong>会话连续性</strong>
+                <p><span class="phrase">会话历史</span>、<wbr><span class="phrase">行程关联</span><wbr><span class="phrase">和压缩摘要</span><wbr><span class="phrase">共同定位上一轮安排</span></p>
+                <div class="chip-row">
+                  <span class="chip">会话历史</span>
+                  <span class="chip">行程关联</span>
+                  <span class="chip">压缩摘要</span>
+                </div>
+              </article>
+              <article class="memory-panel memory-green">
+                <span class="memory-index">02</span>
+                <strong>长期偏好复用</strong>
+                <p><span class="phrase">稳定偏好</span><wbr><span class="phrase">进入后续规划上下文</span>，<wbr><span class="phrase">减少重复描述</span></p>
+                <div class="chip-row">
+                  <span class="chip">MemoryService</span>
+                  <span class="chip">/api/memories</span>
+                  <span class="chip">saved memories</span>
+                </div>
+              </article>
+            </div>
+            <figure class="shot memory-preference-shot">
+              <span class="shot-label">真实偏好设置</span>
+              <img src="preference-settings-real-seeded.png" width="1399" height="884" loading="lazy" alt="填充多条偏好记忆后的真实偏好设置界面" />
+            </figure>
+          </div>
+          <aside class="notes">合并多轮连续性和长期记忆：上下文接本次，记忆带跨次偏好</aside>
+        </section>
+
+        <section class="slide red skill-intro-slide" data-section="10 / 13">
+          <header class="header">
+            <span class="label">Skill</span>
+            <h2><span class="phrase">把优质行程经验</span><wbr><span class="phrase">转成可复用能力</span></h2>
+            <p class="lead"><span class="phrase">既能复刻他人的成熟路线方法</span>，<wbr><span class="phrase">也能沉淀自己的规划偏好</span></p>
+          </header>
+          <img class="body skill-generated-body" src="skill-reuse-body-transparent.png" width="1420" height="520" alt="Skill 经验复用主体图：复刻优质行程经验，导入、沉淀并在运行时读取" />
+          <aside class="notes">Skill 单独讲，不作为普通截图页略过</aside>
+        </section>
+
+        <section class="slide soft skill-product-slide skill-plaza-slide" data-section="11 / 13">
+          <header class="header">
+            <span class="label">Skill Plaza</span>
+            <h2><span class="phrase">在广场选旅行风格</span>，<wbr><span class="phrase">挂到当前行程</span></h2>
+          </header>
+          <div class="body split reverse">
+            <figure class="shot medium-shot skill-product-shot">
+              <span class="shot-label">Skill 广场</span>
+              <img src="skill-plaza-main-crop.png" width="1102" height="884" loading="lazy" alt="Skill 广场界面" />
+            </figure>
+            <div class="steps">
+              <article class="step-row"><span class="num">1</span><div><h3>浏览</h3><p><span class="phrase">按当前行程</span><wbr><span class="phrase">挑旅行风格</span></p></div></article>
+              <article class="step-row"><span class="num">2</span><div><h3>导入</h3><p><span class="phrase">选中的 Skill</span> <wbr><span class="phrase">进入当前行程</span></p></div></article>
+              <article class="step-row"><span class="num">3</span><div><h3>挂载</h3><p><span class="phrase">后续规划时</span> <wbr><span class="phrase">Agent 会读取它</span></p></div></article>
+            </div>
+          </div>
+          <aside class="notes">解释用户如何向 Agent 添加 Skill 的第一条路径</aside>
+        </section>
+
+        <section class="slide skill-product-slide skill-creator-slide" data-section="12 / 13">
+          <header class="header">
+            <span class="label">Skill Creator</span>
+            <h2><span class="phrase">边聊边创建</span>，<wbr><span class="phrase">把个人经验</span><wbr><span class="phrase">保存成旅行 Skill</span></h2>
+          </header>
+          <div class="body skill-flow">
+            <figure class="shot medium-shot skill-product-shot">
+              <span class="shot-label">引导创建</span>
+              <img src="skill-creator-entry-process.png" width="1120" height="760" loading="lazy" alt="Skill Creator 从来源入口进入创作助手追问补全结构的过程界面" />
+            </figure>
+            <div class="steps">
+              <article class="step-row"><span class="num">问</span><div><h3>拆解经验</h3><p><span class="phrase">通过对话收集</span><wbr><span class="phrase">适用场景</span>、<wbr><span class="phrase">规则和限制</span></p></div></article>
+              <article class="step-row"><span class="num">补</span><div><h3>补全结构</h3><p><span class="phrase">缺字段或格式异常时</span>，<wbr><span class="phrase">系统继续追问补齐</span></p></div></article>
+              <article class="step-row"><span class="num">用</span><div><h3>挂到行程</h3><p><span class="phrase">保存后可发布</span>、<wbr><span class="phrase">收藏</span>，<wbr><span class="phrase">也可直接给 Agent 使用</span></p></div></article>
+            </div>
+          </div>
+          <aside class="notes">解释 Skill Creator，避免只放截图</aside>
+        </section>
+
+        <section class="slide red thanks-slide" data-section="13 / 13">
+          <div class="body center">
+            <span class="label">Journey Agent</span>
+            <h1 class="thanks-title">谢谢大家</h1>
+            <div class="thanks-tags" aria-label="答辩收尾信息">
+              <span class="chip">自由行规划 Agent 工作台</span>
+              <span class="chip">接下来进入实机演示</span>
+              <span class="chip">Q&amp;A</span>
+            </div>
+          </div>
+          <aside class="notes">收尾感谢大家，并自然转到实机演示和问答</aside>
+        </section>
+      </div>
+    </main>
+
+    <nav class="nav" aria-label="幻灯片控制">
+      <button type="button" data-go="prev" aria-label="上一页">‹</button>
+      <span class="slide-count" aria-live="polite">1 / 13</span>
+      <button type="button" data-go="next" aria-label="下一页">›</button>
+      <button type="button" class="primary-nav" data-go="fullscreen">全屏</button>
+    </nav>
+
+    <script>
+      (() => {
+        const root = document.documentElement;
+        const stage = document.querySelector(".stage");
+        const slides = Array.from(document.querySelectorAll(".slide"));
+        const counter = document.querySelector(".slide-count");
+        const total = slides.length;
+        let index = 0;
+
+        function clamp(value) {
+          return Math.max(0, Math.min(total - 1, value));
+        }
+
+        function fitStage() {
+          const scale = Math.min(window.innerWidth / 1600, window.innerHeight / 900);
+          root.style.setProperty("--stage-scale", String(scale));
+          stage.style.left = `${Math.max(0, (window.innerWidth - 1600 * scale) / 2)}px`;
+          stage.style.top = `${Math.max(0, (window.innerHeight - 900 * scale) / 2)}px`;
+        }
+
+        function updateHash() {
+          const nextHash = `#${String(index + 1).padStart(2, "0")}`;
+          if (location.hash !== nextHash) history.replaceState(null, "", nextHash);
+        }
+
+        function render() {
+          index = clamp(index);
+          slides.forEach((slide, slideIndex) => {
+            slide.classList.toggle("is-active", slideIndex === index);
+          });
+          root.style.setProperty("--progress", total <= 1 ? 100 : (index / (total - 1)) * 100);
+          counter.textContent = `${index + 1} / ${total}`;
+          document.querySelector('[data-go="prev"]').disabled = index === 0;
+          document.querySelector('[data-go="next"]').disabled = index === total - 1;
+          updateHash();
+        }
+
+        function go(nextIndex) {
+          index = clamp(nextIndex);
+          render();
+        }
+
+        function fromHash() {
+          const raw = Number(location.hash.replace("#", ""));
+          if (Number.isFinite(raw) && raw > 0) index = clamp(raw - 1);
+          render();
+        }
+
+        document.addEventListener("click", (event) => {
+          const button = event.target.closest("[data-go]");
+          if (!button) return;
+          const action = button.getAttribute("data-go");
+          if (action === "next") go(index + 1);
+          if (action === "prev") go(index - 1);
+          if (action === "fullscreen") {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+            else document.exitFullscreen?.();
+          }
+        });
+
+        document.addEventListener("keydown", (event) => {
+          if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") {
+            event.preventDefault();
+            go(index + 1);
+          }
+          if (event.key === "ArrowLeft" || event.key === "PageUp") {
+            event.preventDefault();
+            go(index - 1);
+          }
+          if (event.key === "Home") go(0);
+          if (event.key === "End") go(total - 1);
+          if (event.key.toLowerCase() === "f") {
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+            else document.exitFullscreen?.();
+          }
+        });
+
+        window.addEventListener("hashchange", fromHash);
+        window.addEventListener("resize", fitStage);
+        fitStage();
+        fromHash();
+      })();
+    </script>
+  </body>
+</html>
