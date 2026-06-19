@@ -18,12 +18,12 @@ export async function apiPost<T>(path: string, body: unknown, ..._unused: unknow
   return apiJson("POST", path, body);
 }
 
-export async function apiPostStrict<T>(path: string, body: unknown): Promise<T> {
+export async function apiPostStrict<T>(path: string, body: unknown, options: { timeoutMs?: number } = {}): Promise<T> {
   const response = await strictFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000)
+    signal: AbortSignal.timeout(options.timeoutMs ?? 20_000)
   });
   return (await response.json()) as T;
 }
@@ -136,6 +136,10 @@ async function readErrorBody(response: Response): Promise<unknown> {
 function readErrorMessage(data: unknown, status: number): string {
   if (data && typeof data === "object" && "message" in data) {
     const message = (data as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message.trim();
+  }
+  if (data && typeof data === "object" && "error" in data) {
+    const message = (data as { error?: unknown }).error;
     if (typeof message === "string" && message.trim()) return message.trim();
   }
   if (typeof data === "string" && data.trim()) return data.trim();

@@ -2670,6 +2670,8 @@ describe("travel workbench API", () => {
     expect(result.body.session.draft.rules).toEqual(expect.arrayContaining(["傍晚时段优先保留低强度体验"]));
     const body = JSON.parse(String(calls[0]?.init?.body ?? "{}"));
     expect(body.messages[0].content).toContain("旅行风格 Skill 创作助手");
+    expect(body.messages[0].content).toContain("通常在 5 轮左右收敛");
+    expect(body.messages[0].content).toContain("最多 10 轮");
     expect(body.messages[0].content).not.toContain("Skill Creation Process");
   });
 
@@ -2840,6 +2842,87 @@ describe("travel workbench API", () => {
     expect(reply.body.session.draft.forbidden).toEqual(expect.arrayContaining(["为了打卡塞满每天行程"]));
   });
 
+  it("keeps Creator Agent interview patches out of the global skill list until ready", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        const content =
+          callCount === 1
+            ? {
+                question: "哪些做法要稳定保留？",
+                mode: "multiple",
+                options: [
+                  { id: "small-shops", label: "保留傍晚小店" },
+                  { id: "sea-walks", label: "安排海边散步" },
+                  { id: "low-density", label: "每天少排一点" }
+                ],
+                progressPercent: 50,
+                draftPatch: { rules: ["每天最多两个核心安排"] },
+                done: false
+              }
+            : callCount === 2
+              ? {
+                  question: "哪些安排应该避免？",
+                  mode: "multiple",
+                  options: [
+                    { id: "long-transfer", label: "连续跨区赶路" },
+                    { id: "packed-day", label: "全天塞满景点" },
+                    { id: "hot-walk", label: "午后暴晒长距离步行" }
+                  ],
+                  progressPercent: 75,
+                  draftPatch: { forbidden: ["连续跨区赶路"] },
+                  done: false
+                }
+              : {
+                  assistantMessage: "这版已经可以进入最终检查。",
+                  progressPercent: 100,
+                  draftPatch: { tags: ["海边", "小店", "慢节奏"] },
+                  done: true
+                };
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "海边散步、傍晚小店、不要赶路。" })
+      .expect(201);
+
+    const draftId = started.body.session.draft.id;
+    expect(started.body.session.draft.rules).toEqual(expect.arrayContaining(["每天最多两个核心安排"]));
+    let listed = await request(app).get("/api/skills").expect(200);
+    expect(listed.body.items.map((skill: { id: string }) => skill.id)).not.toContain(draftId);
+
+    const reply = await request(app)
+      .post(`/api/skills/creator/${started.body.session.id}/reply`)
+      .send({ selectedOptionIds: ["small-shops"], customAnswer: "" })
+      .expect(200);
+
+    expect(reply.body.session.draft.forbidden).toEqual(expect.arrayContaining(["连续跨区赶路"]));
+    listed = await request(app).get("/api/skills").expect(200);
+    expect(listed.body.items.map((skill: { id: string }) => skill.id)).not.toContain(draftId);
+
+    const final = await request(app)
+      .post(`/api/skills/creator/${reply.body.session.id}/reply`)
+      .send({ selectedOptionIds: ["long-transfer"], customAnswer: "" })
+      .expect(200);
+
+    expect(final.body.session.status).toBe("ready");
+    listed = await request(app).get("/api/skills").expect(200);
+    expect(listed.body.items.find((skill: { id: string }) => skill.id === draftId)).toMatchObject({
+      rules: expect.arrayContaining(["每天最多两个核心安排"]),
+      forbidden: expect.arrayContaining(["连续跨区赶路"])
+    });
+  });
+
   it("asks the Creator Agent to replace a repeated question with full context", async () => {
     vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
     let callCount = 0;
@@ -3002,6 +3085,373 @@ describe("travel workbench API", () => {
     expect(result.body.turn.progressPercent).toBe(72);
   });
 
+  it("accepts a completed Creator Agent turn when the merged draft is ready", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        const content =
+          callCount === 1
+            ? {
+                question: "生成行程时，哪些安排一出现就算跑偏？",
+                mode: "multiple",
+                options: [
+                  { id: "late-walk", label: "午饭后安排超过1小时的步行或户外活动" },
+                  { id: "late-dinner", label: "晚餐安排在晚上8点以后" },
+                  { id: "packed-days", label: "一天安排3个以上核心景点" }
+                ],
+                progressPercent: 95,
+                draftPatch: {
+                  tags: ["亲子", "慢节奏"],
+                  rules: ["上午安排一个核心景点，午后保留休息"],
+                  forbidden: ["全天没有安排午休或咖啡馆休息时间"]
+                },
+                done: false
+              }
+            : callCount === 2
+              ? {
+                  assistantMessage: "这版已经可以发布。",
+                  progressPercent: 100,
+                  draftPatch: {
+                    forbidden: ["午饭后安排超过1小时的步行或户外活动", "晚餐安排在晚上8点以后"]
+                  },
+                  done: true
+                }
+              : {
+                  question: "不应该继续问这个问题",
+                  mode: "single",
+                  options: [
+                    { id: "a", label: "A" },
+                    { id: "b", label: "B" },
+                    { id: "c", label: "C" }
+                  ],
+                  progressPercent: 80,
+                  draftPatch: {},
+                  done: false
+                };
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(content) } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({
+        sourceText:
+          "亲子慢节奏旅行，上午安排一个核心景点，午后回酒店或咖啡馆休息，雨天优先室内活动。"
+      })
+      .expect(201);
+
+    const reply = await request(app)
+      .post(`/api/skills/creator/${started.body.session.id}/reply`)
+      .send({ selectedOptionIds: ["late-walk", "late-dinner"], customAnswer: "" })
+      .expect(200);
+
+    expect(callCount).toBe(2);
+    expect(reply.body.turn.done).toBe(true);
+    expect(reply.body.session.status).toBe("ready");
+    expect(reply.body.session.draft.forbidden).toEqual(
+      expect.arrayContaining(["午饭后安排超过1小时的步行或户外活动", "晚餐安排在晚上8点以后"])
+    );
+  });
+
+  it("normalizes null fields from completed Creator Agent turns", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    assistantMessage: "这版已经可以发布。",
+                    question: null,
+                    mode: null,
+                    options: null,
+                    customPlaceholder: null,
+                    progressPercent: 100,
+                    draftPatch: {
+                      tags: ["亲子", "慢节奏"],
+                      rules: ["上午安排一个核心景点，午后保留休息"],
+                      forbidden: ["午饭后安排超过1小时的步行或户外活动"]
+                    },
+                    done: true
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({
+        sourceText:
+          "亲子慢节奏旅行，上午安排一个核心景点，午后回酒店或咖啡馆休息，雨天优先室内活动。"
+      })
+      .expect(201);
+
+    expect(callCount).toBe(1);
+    expect(result.body.turn.done).toBe(true);
+    expect(result.body.turn.question).toBeUndefined();
+    expect(result.body.session.status).toBe("ready");
+  });
+
+  it("normalizes empty question fields from completed Creator Agent turns", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    assistantMessage: "这版已经可以发布。",
+                    question: "",
+                    mode: "single",
+                    options: [],
+                    customPlaceholder: "",
+                    progressPercent: 100,
+                    draftPatch: {
+                      tags: ["亲子", "慢节奏"],
+                      rules: ["上午安排一个核心景点，午后保留休息"],
+                      forbidden: ["午饭后安排超过1小时的步行或户外活动"]
+                    },
+                    done: true
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({
+        sourceText:
+          "亲子慢节奏旅行，上午安排一个核心景点，午后回酒店或咖啡馆休息，雨天优先室内活动。"
+      })
+      .expect(201);
+
+    expect(callCount).toBe(1);
+    expect(result.body.turn.done).toBe(true);
+    expect(result.body.turn.question).toBeUndefined();
+    expect(result.body.turn.mode).toBeUndefined();
+    expect(result.body.turn.options).toBeUndefined();
+    expect(result.body.session.status).toBe("ready");
+  });
+
+  it("returns the current Creator Agent turn when submitted option ids are stale", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    question: "这套风格最需要保留哪种节奏？",
+                    mode: "multiple",
+                    options: [
+                      { id: "slow-morning", label: "保留慢上午" },
+                      { id: "long-break", label: "午后留休息" },
+                      { id: "local-shops", label: "穿插本地小店" }
+                    ],
+                    customPlaceholder: "也可以写自己的答案",
+                    progressPercent: 40,
+                    draftPatch: { tags: ["慢节奏"] },
+                    done: false
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "亲子慢节奏旅行，上午一个重点，下午回酒店休息。" })
+      .expect(201);
+
+    const stale = await request(app)
+      .post(`/api/skills/creator/${started.body.session.id}/reply`)
+      .send({ selectedOptionIds: ["contiguous-route", "adequate-photo-time"], customAnswer: "" })
+      .expect(409);
+
+    expect(stale.body.error).toContain("selected option ids are not available");
+    expect(stale.body.session.id).toBe(started.body.session.id);
+    expect(stale.body.turn.question).toBe("这套风格最需要保留哪种节奏？");
+    expect(stale.body.turn.options.map((option: { id: string }) => option.id)).toEqual([
+      "slow-morning",
+      "long-break",
+      "local-shops"
+    ]);
+  });
+
+  it("stops around five Creator Agent questions once the draft is ready", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    question: `第 ${callCount} 轮还想继续确认什么？`,
+                    mode: "single",
+                    options: [
+                      { id: `choice-${callCount}-a`, label: "保留慢节奏" },
+                      { id: `choice-${callCount}-b`, label: "增加自由探索" },
+                      { id: `choice-${callCount}-c`, label: "减少跨区移动" }
+                    ],
+                    progressPercent: Math.min(95, 40 + callCount * 8),
+                    draftPatch: {
+                      tags: ["亲子", "慢节奏"],
+                      rules: [`第 ${callCount} 轮确认的规划规则`],
+                      forbidden: [`第 ${callCount} 轮确认的避免项`]
+                    },
+                    done: false
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({
+        sourceText:
+          "亲子慢节奏旅行，上午安排一个核心景点，午后回酒店或咖啡馆休息，雨天优先室内活动。"
+      })
+      .expect(201);
+
+    let sessionId = started.body.session.id;
+    let optionId = started.body.turn.options[0].id;
+    let latest: request.Response | undefined;
+    for (let index = 0; index < 5; index += 1) {
+      latest = await request(app)
+        .post(`/api/skills/creator/${sessionId}/reply`)
+        .send({ selectedOptionIds: [optionId], customAnswer: "" })
+        .expect(200);
+      sessionId = latest.body.session.id;
+      optionId = latest.body.turn.options?.[0]?.id ?? optionId;
+    }
+
+    expect(callCount).toBe(6);
+    expect(latest?.body.turn.done).toBe(true);
+    expect(latest?.body.turn.question).toBeUndefined();
+    expect(latest?.body.session.status).toBe("ready");
+    expect(latest?.body.turn.assistantMessage).toContain("已完成 5 轮");
+  });
+
+  it("stops asking Creator Agent questions after ten answered turns when the draft is ready", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        callCount += 1;
+        const questionNumber = callCount;
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    question: `第 ${questionNumber} 轮还想继续确认什么？`,
+                    mode: "single",
+                    options: [
+                      { id: `choice-${questionNumber}-a`, label: "保留慢节奏" },
+                      { id: `choice-${questionNumber}-b`, label: "增加自由探索" },
+                      { id: `choice-${questionNumber}-c`, label: "减少跨区移动" }
+                    ],
+                    progressPercent: 70,
+                    draftPatch: {
+                      tags: ["亲子", "慢节奏"],
+                      rules: [`第 ${questionNumber} 轮确认的规划规则`],
+                      forbidden: [`第 ${questionNumber} 轮确认的避免项`]
+                    },
+                    done: false
+                  })
+                }
+              }
+            ]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const started = await request(app)
+      .post("/api/skills/creator/start")
+      .send({
+        sourceText:
+          "亲子慢节奏旅行，上午安排一个核心景点，午后回酒店或咖啡馆休息，雨天优先室内活动。"
+      })
+      .expect(201);
+
+    let sessionId = started.body.session.id;
+    let optionId = started.body.turn.options[0].id;
+    let latest: request.Response | undefined;
+    for (let index = 0; index < 10; index += 1) {
+      latest = await request(app)
+        .post(`/api/skills/creator/${sessionId}/reply`)
+        .send({ selectedOptionIds: [optionId], customAnswer: "" })
+        .expect(200);
+      sessionId = latest.body.session.id;
+      optionId = latest.body.turn.options?.[0]?.id ?? optionId;
+    }
+
+    expect(callCount).toBe(11);
+    expect(latest?.body.turn.done).toBe(true);
+    expect(latest?.body.turn.question).toBeUndefined();
+    expect(latest?.body.session.status).toBe("ready");
+    expect(latest?.body.turn.assistantMessage).toContain("已达到 10 轮");
+  });
+
   it("repairs malformed Creator Agent JSON once before returning the turn", async () => {
     vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
     let callCount = 0;
@@ -3040,6 +3490,64 @@ describe("travel workbench API", () => {
 
     expect(callCount).toBe(2);
     expect(result.body.turn.question).toBe("这套旅行风格换到新城市时，哪些体验必须保留？");
+  });
+
+  it("sends Creator Agent schema validation messages back through repair retries", async () => {
+    vi.stubEnv("DEEPSEEK_API_KEY", "deepseek-test-key");
+    let callCount = 0;
+    const requestBodies: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url, init) => {
+        callCount += 1;
+        requestBodies.push(JSON.parse(String((init as RequestInit).body ?? "{}")));
+        const tooManyOptions = {
+          question: "Which experiences should this style preserve?",
+          mode: "multiple",
+          options: [
+            { id: "sunset", label: "Sunset walks" },
+            { id: "shops", label: "Small local shops" },
+            { id: "slow-days", label: "Slow days" },
+            { id: "local-breakfast", label: "Local breakfast" },
+            { id: "photo-time", label: "Photo time" },
+            { id: "night-market", label: "Night market" }
+          ],
+          progressPercent: 45,
+          draftPatch: { tags: ["slow-travel"] },
+          done: false
+        };
+        const validTurn = {
+          question: "Which experiences should this style preserve?",
+          mode: "multiple",
+          options: [
+            { id: "sunset", label: "Sunset walks" },
+            { id: "shops", label: "Small local shops" },
+            { id: "slow-days", label: "Slow days" }
+          ],
+          progressPercent: 45,
+          draftPatch: { tags: ["slow-travel"] },
+          done: false
+        };
+        const content = JSON.stringify(callCount < 3 ? tooManyOptions : validTurn);
+        return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      })
+    );
+
+    const db = createInMemoryDatabase();
+    const app = createApp({ db });
+    const result = await request(app)
+      .post("/api/skills/creator/start")
+      .send({ sourceText: "I like sunset walks, small shops, and slow days." })
+      .expect(201);
+
+    expect(callCount).toBe(3);
+    expect(result.body.turn.options).toHaveLength(3);
+    const repairInstruction = requestBodies[1]?.messages.at(-1)?.content;
+    expect(repairInstruction).toContain("Array must contain at most 5 element");
+    expect(repairInstruction).toContain("options");
   });
 
   it("updates skill metadata, toggles my favorite state, and lists favorite skills", async () => {

@@ -759,6 +759,10 @@ describe("Travel Skill Agent frontend", () => {
 
     await user.click(screen.getByRole("button", { name: "新建行程" }));
     const dialog = screen.getByRole("dialog", { name: "新建行程" });
+    const dialogSections = Array.from(dialog.children);
+    expect(dialog).toHaveClass("grid-rows-[auto_minmax(0,1fr)_auto]");
+    expect(dialogSections[1]).toHaveClass("min-h-0", "overflow-auto");
+    expect(dialogSections[2]).toHaveClass("shrink-0");
     await user.type(within(dialog).getByLabelText("新建行程名称"), "上海亲子周末");
     await user.type(within(dialog).getByLabelText("新建行程出发点"), "上海");
     fireEvent.change(within(dialog).getByLabelText("新建行程出发日期"), { target: { value: "2026-08-01" } });
@@ -3128,6 +3132,9 @@ describe("Travel Skill Agent frontend", () => {
     expect(screen.queryByText(/SKILL\.md/)).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Skill 名称")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Skill 正文")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Skill 广场" }));
+    expect(screen.queryByText("海边小店松弛风格")).not.toBeInTheDocument();
   });
 
   it("submits multi-option Skill creator answers with custom input to the session reply endpoint", async () => {
@@ -3341,6 +3348,90 @@ describe("Travel Skill Agent frontend", () => {
       customAnswer: "需要保留日落后的自由时间"
     });
     expect(screen.getByRole("heading", { name: "哪些安排应该避免？" })).toBeInTheDocument();
+  });
+
+  it("syncs to the latest Skill creator question when a stale answer error includes the current turn", async () => {
+    const replyBodies: unknown[] = [];
+    const staleTurn = creatorTurn({
+      question: "哪些做法要稳定保留？",
+      mode: "multiple",
+      progressPercent: 50,
+      options: [
+        { id: "contiguous-route", label: "路线尽量连贯" },
+        { id: "adequate-photo-time", label: "保留拍照时间" },
+        { id: "low-density", label: "每天少排一点" }
+      ]
+    });
+    const currentTurn = creatorTurn({
+      question: "哪些安排应该避免？",
+      mode: "single",
+      progressPercent: 70,
+      options: [
+        { id: "avoid-long-walk", label: "避免长距离步行" },
+        { id: "avoid-late-dinner", label: "避免晚饭过晚" },
+        { id: "avoid-rushed-transfer", label: "避免赶场换乘" }
+      ]
+    });
+    const doneTurn = creatorTurn({
+      question: undefined,
+      mode: undefined,
+      options: undefined,
+      progressPercent: 100,
+      done: true
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/skills/creator/start")) {
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: staleTurn }), turn: staleTurn }), {
+            status: 201,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        if (url.includes("/api/skills/creator/creator-session-1/reply")) {
+          replyBodies.push(JSON.parse(String(init?.body ?? "{}")));
+          if (replyBodies.length === 1) {
+            return new Response(
+              JSON.stringify({
+                error: "Invalid skill creator answer: selected option ids are not available on this turn: contiguous-route, adequate-photo-time",
+                session: creatorSession({ currentTurn }),
+                turn: currentTurn
+              }),
+              { status: 409, headers: { "Content-Type": "application/json" } }
+            );
+          }
+          return new Response(JSON.stringify({ session: creatorSession({ currentTurn: doneTurn, status: "ready" }), turn: doneTurn }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response("", { status: 404 });
+      })
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "创作 Skill" }));
+    await user.type(screen.getByLabelText("来源材料"), "亲子慢节奏旅行，上午一个重点，下午回酒店休息。");
+    await user.click(screen.getByRole("button", { name: "开始创作" }));
+    await user.click(await screen.findByRole("button", { name: "路线尽量连贯" }));
+    await user.click(screen.getByRole("button", { name: "保留拍照时间" }));
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
+
+    expect(await screen.findByRole("heading", { name: "哪些安排应该避免？" })).toBeInTheDocument();
+    expect(screen.getByText("上一轮已经处理完成，已同步到最新问题。")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "避免长距离步行" }));
+    await user.click(screen.getByRole("button", { name: "提交回答" }));
+
+    await waitFor(() => {
+      expect(replyBodies).toHaveLength(2);
+    });
+    expect(replyBodies[1]).toEqual({
+      selectedOptionIds: ["avoid-long-walk"],
+      customAnswer: ""
+    });
   });
 
   it("lets a user manage saved memories from the settings page", async () => {

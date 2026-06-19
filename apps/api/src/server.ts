@@ -13,6 +13,7 @@ import { MemoryService } from "./services/memoryService.js";
 import { SkillCreatorAgentService } from "./services/skillCreatorAgentService.js";
 import { SkillService } from "./services/skillService.js";
 import {
+  SkillCreatorAnswerValidationError,
   TravelItinerarySchema,
   type Activity,
   type AgentRunEvent,
@@ -272,14 +273,29 @@ export function createApp(options: CreateAppOptions = {}): Express {
   });
 
   app.post("/api/skills/creator/:sessionId/reply", async (req, res) => {
-    const result = await skillCreatorAgents.reply({
-      sessionId: req.params.sessionId,
-      answer: {
-        selectedOptionIds: Array.isArray(req.body.selectedOptionIds) ? req.body.selectedOptionIds : [],
-        customAnswer: asString(req.body.customAnswer) ?? ""
+    try {
+      const result = await skillCreatorAgents.reply({
+        sessionId: req.params.sessionId,
+        answer: {
+          selectedOptionIds: Array.isArray(req.body.selectedOptionIds) ? req.body.selectedOptionIds : [],
+          customAnswer: asString(req.body.customAnswer) ?? ""
+        }
+      });
+      res.json(result);
+    } catch (error) {
+      if (isSkillCreatorAnswerValidationError(error)) {
+        const currentSession = db.getSkillCreatorSession(req.params.sessionId);
+        if (currentSession?.currentTurn) {
+          res.status(409).json({
+            error: error.message,
+            session: currentSession,
+            turn: currentSession.currentTurn
+          });
+          return;
+        }
       }
-    });
-    res.json(result);
+      throw error;
+    }
   });
 
   app.post("/api/skills/:id/publish", (req, res) => {
@@ -432,6 +448,10 @@ function asString(value: unknown): string | undefined {
   if (typeof value === "string") return value;
   if (Array.isArray(value) && typeof value[0] === "string") return value[0];
   return undefined;
+}
+
+function isSkillCreatorAnswerValidationError(error: unknown): error is SkillCreatorAnswerValidationError {
+  return error instanceof SkillCreatorAnswerValidationError || (error instanceof Error && error.name === "SkillCreatorAnswerValidationError");
 }
 
 function readOptionalNonNegativeNumber(value: unknown): number | undefined {

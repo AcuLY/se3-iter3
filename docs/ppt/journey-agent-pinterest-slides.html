@@ -2203,6 +2203,60 @@
         font-size: 24px;
       }
 
+      .creator-showcase {
+        display: grid;
+        grid-template-rows: minmax(0, 462px) auto;
+        gap: 12px;
+        min-height: 0;
+      }
+
+      .creator-image-row,
+      .creator-bottom-copy {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px;
+        min-width: 0;
+      }
+
+      .creator-shot {
+        height: 462px;
+        padding: 8px;
+      }
+
+      .creator-shot .shot-label {
+        display: none;
+      }
+
+      .creator-shot img {
+        object-fit: contain;
+        object-position: center top;
+      }
+
+      .creator-bottom-card {
+        display: grid;
+        grid-template-columns: 54px minmax(0, 1fr);
+        gap: 15px;
+        align-items: center;
+        min-height: 126px;
+        border-radius: 20px;
+        background: var(--paper);
+        padding: 18px 19px;
+        box-shadow: 0 12px 30px rgba(28, 28, 18, 0.08);
+      }
+
+      .creator-bottom-card .num {
+        width: 52px;
+        height: 52px;
+        font-size: 22px;
+      }
+
+      .creator-bottom-card p {
+        color: var(--body);
+        font-size: 24px;
+        font-weight: 680;
+        line-height: 1.28;
+      }
+
       .steps {
         display: grid;
         gap: 15px;
@@ -2763,15 +2817,25 @@
             <span class="label">Skill Creator</span>
             <h2><span class="phrase">边聊边创建</span>，<wbr><span class="phrase">把个人经验</span><wbr><span class="phrase">保存成旅行 Skill</span></h2>
           </header>
-          <div class="body skill-flow">
-            <figure class="shot medium-shot skill-product-shot">
-              <span class="shot-label">引导创建</span>
-              <img src="skill-creator-entry-process.png" width="1120" height="760" loading="lazy" alt="Skill Creator 从来源入口进入创作助手追问补全结构的过程界面" />
-            </figure>
-            <div class="steps">
-              <article class="step-row"><span class="num">问</span><div><h3>拆解经验</h3><p><span class="phrase">通过对话收集</span><wbr><span class="phrase">适用场景</span>、<wbr><span class="phrase">规则和限制</span></p></div></article>
-              <article class="step-row"><span class="num">补</span><div><h3>补全结构</h3><p><span class="phrase">缺字段或格式异常时</span>，<wbr><span class="phrase">系统继续追问补齐</span></p></div></article>
-              <article class="step-row"><span class="num">用</span><div><h3>挂到行程</h3><p><span class="phrase">保存后可发布</span>、<wbr><span class="phrase">收藏</span>，<wbr><span class="phrase">也可直接给 Agent 使用</span></p></div></article>
+          <div class="body creator-showcase">
+            <div class="creator-image-row">
+              <figure class="shot creator-shot">
+                <span class="shot-label">来源入口</span>
+                <img src="skill-creator-source-crop.png?v=1" width="430" height="500" loading="lazy" alt="Skill Creator 来源材料输入界面" />
+              </figure>
+              <figure class="shot creator-shot">
+                <span class="shot-label">助手追问</span>
+                <img src="skill-creator-followup-crop.png?v=1" width="446" height="378" loading="lazy" alt="Skill Creator 助手追问补全结构界面" />
+              </figure>
+              <figure class="shot creator-shot">
+                <span class="shot-label">挂载后 Agent 操作</span>
+                <img src="skill-mounted-agent-sidebar-crop.png?v=2" width="488" height="472" loading="lazy" alt="挂载旅行 Skill 后，Agent 读取当前风格并完成搜索地点、查询天气和规划交通路线" />
+              </figure>
+            </div>
+            <div class="creator-bottom-copy">
+              <article class="creator-bottom-card"><span class="num">问</span><div><p>通过对话收集适用场景、规则和限制</p></div></article>
+              <article class="creator-bottom-card"><span class="num">补</span><div><p>缺字段或格式异常时，系统继续追问补齐</p></div></article>
+              <article class="creator-bottom-card"><span class="num">用</span><div><p>保存后直接进入上下文，给 Agent 使用</p></div></article>
             </div>
           </div>
           <aside class="notes">解释 Skill Creator，避免只放截图</aside>

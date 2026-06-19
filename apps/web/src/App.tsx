@@ -93,6 +93,7 @@ import { cn } from "@/lib/utils";
 type Page = "home" | "workbench" | "result" | "skills" | "creator" | "settings";
 type MapRouteFocusRequest = { dayId: string; legId: string; nonce: number };
 const LAST_ITINERARY_ID_KEY = "journey:last-itinerary-id";
+const SKILL_CREATOR_REQUEST_TIMEOUT_MS = 90_000;
 const ASSISTANT_PROMPT_SUGGESTIONS = [
   "Day 2 下午补一个室内景点，节奏轻松一点",
   "把今天预算压到 800 元以内，尽量少跨区",
@@ -1089,10 +1090,10 @@ export default function App() {
     const useItineraryContext = creatorSourceMode === "itinerary" || creatorSourceMode === "conversation";
     const result = await apiPostStrict<SkillCreatorStartResponse>(
       "/skills/creator/start",
-      useItineraryContext ? { sourceText: creatorText, itineraryId: itinerary.id } : { sourceText: creatorText }
+      useItineraryContext ? { sourceText: creatorText, itineraryId: itinerary.id } : { sourceText: creatorText },
+      { timeoutMs: SKILL_CREATOR_REQUEST_TIMEOUT_MS }
     );
-    setSkills((current) => [result.session.draft, ...current.filter((skill) => skill.id !== result.session.draft.id)]);
-    setCreatorDraft(result.session.draft);
+    syncReadyCreatorDraft(result.session);
     return result;
   }
 
@@ -1100,10 +1101,20 @@ export default function App() {
     sessionId: string,
     answer: { selectedOptionIds: string[]; customAnswer: string }
   ): Promise<SkillCreatorReplyResponse> {
-    const result = await apiPostStrict<SkillCreatorReplyResponse>(`/skills/creator/${sessionId}/reply`, answer);
-    setSkills((current) => [result.session.draft, ...current.filter((skill) => skill.id !== result.session.draft.id)]);
-    setCreatorDraft(result.session.draft);
+    const result = await apiPostStrict<SkillCreatorReplyResponse>(`/skills/creator/${sessionId}/reply`, answer, {
+      timeoutMs: SKILL_CREATOR_REQUEST_TIMEOUT_MS
+    });
+    syncReadyCreatorDraft(result.session);
     return result;
+  }
+
+  function syncReadyCreatorDraft(session: SkillCreatorSession) {
+    if (session.status !== "ready") {
+      setCreatorDraft(null);
+      return;
+    }
+    setSkills((current) => [session.draft, ...current.filter((skill) => skill.id !== session.draft.id)]);
+    setCreatorDraft(session.draft);
   }
 
   function useCurrentItineraryAsSkillSource() {
@@ -2329,7 +2340,7 @@ function NewTripDialog({
         role="dialog"
         aria-modal="true"
         aria-label="新建行程"
-        className="grid max-h-[min(720px,calc(100vh-32px))] w-full max-w-2xl overflow-hidden rounded-[20px] border border-border bg-white shadow-2xl"
+        className="grid max-h-[min(720px,calc(100vh-32px))] w-full max-w-2xl grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-[20px] border border-border bg-white shadow-2xl"
         onSubmit={submit}
       >
         <div className="flex items-start justify-between gap-4 border-b border-border px-5 py-4">
@@ -2404,7 +2415,7 @@ function NewTripDialog({
             </p>
           )}
         </div>
-        <div className="flex flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
+        <div className="flex shrink-0 flex-wrap justify-end gap-2 border-t border-border px-5 py-4">
           <Button type="button" variant="outline" className="rounded-full" onClick={onClose}>
             取消
           </Button>
@@ -8132,6 +8143,19 @@ function buildSkillFitReasons(
   return [...reasons].slice(0, 3);
 }
 
+function readSkillCreatorSyncPayload(error: unknown): SkillCreatorReplyResponse | undefined {
+  if (!(error instanceof ApiRequestError)) return undefined;
+  const data = error.data;
+  if (!data || typeof data !== "object") return undefined;
+  const record = data as { session?: unknown; turn?: unknown };
+  if (!record.session || typeof record.session !== "object") return undefined;
+  if (!record.turn || typeof record.turn !== "object") return undefined;
+  return {
+    session: record.session as SkillCreatorSession,
+    turn: record.turn as SkillCreatorTurn
+  };
+}
+
 function SkillCreator({
   sourceText,
   onSourceTextChange,
@@ -8194,7 +8218,17 @@ function SkillCreator({
       setSelectedOptionIds([]);
       setCustomAnswer("");
       setAdvancedOpen(false);
-    } catch {
+    } catch (error) {
+      const synced = readSkillCreatorSyncPayload(error);
+      if (synced) {
+        setSession(synced.session);
+        setTurn(synced.turn);
+        setSelectedOptionIds([]);
+        setCustomAnswer("");
+        setAdvancedOpen(false);
+        setError("上一轮已经处理完成，已同步到最新问题。");
+        return;
+      }
       setError("创作助手没有返回可用问题，请重试本题。");
     } finally {
       setBusy(false);

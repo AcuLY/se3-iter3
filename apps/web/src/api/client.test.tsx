@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiRequestError, apiGet, apiPost } from "./client";
+import { ApiRequestError, apiGet, apiPost, apiPostStrict } from "./client";
 
 describe("strict API client", () => {
   afterEach(() => {
@@ -24,5 +24,20 @@ describe("strict API client", () => {
     );
 
     await expect(apiPost<{ ok: boolean }>("/itineraries", {})).rejects.toBeInstanceOf(ApiRequestError);
+  });
+
+  it("allows strict POST callers to choose a longer timeout", async () => {
+    const signal = new AbortController().signal;
+    const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(signal);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } }))
+    );
+
+    await expect(apiPostStrict<{ ok: boolean }>("/skills/creator/start", {}, { timeoutMs: 90_000 })).resolves.toEqual({
+      ok: true
+    });
+
+    expect(timeoutSpy).toHaveBeenCalledWith(90_000);
   });
 });

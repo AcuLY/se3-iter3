@@ -51,7 +51,7 @@ export function readChatCompletionModelConfig(): ChatCompletionModelConfig | und
     model:
       readEnv("AGENT_MODEL") ??
       readEnv("OPENAI_MODEL") ??
-      (usesDeepSeekFallback ? readEnv("DEEPSEEK_MODEL") ?? "deepseek-chat" : "gpt-4o-mini")
+      (usesDeepSeekFallback ? readEnv("DEEPSEEK_MODEL") ?? "deepseek-v4-pro" : "gpt-4o-mini")
   };
 }
 
